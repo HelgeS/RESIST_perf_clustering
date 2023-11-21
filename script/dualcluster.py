@@ -10,6 +10,8 @@ from scipy.cluster.hierarchy import dendrogram
 import pandas as pd
 from sklearn.model_selection import train_test_split
 import os.path as osp
+from scipy import stats
+from sklearn.metrics import pairwise_distances
 
 
 def split_data(
@@ -59,11 +61,12 @@ def split_data(
 
 def format_time(s):
     dtf = datetime.time.fromisoformat("00:0" + s.strip())
-    return dtf.second + dtf.microsecond/1_000_000
+    return dtf.minute*60 + dtf.second + dtf.microsecond/1_000_000
 
 # %%
 nb_meas = 8  # this is how many measures were taken (i.e. how many measurement columns are in the dataframe)
 perf_matrix, nb_data = load_all_csv("../data/res_ugc/", ext="csv", with_names=True)
+perf_matrix["elapsedtime"] = perf_matrix["elapsedtime"].apply(format_time)
 # input_properties = pd.read_csv("../data/res_ugc_properties.csv")  # Does not match all inputs from perf_matrix?
 # del input_properties["id"]
 idx = compute_index(perf_matrix, nb_data)
@@ -93,7 +96,6 @@ print(f"Input new: {100*test_inp_new.shape[0]/perf_matrix.shape[0]:.2f}%")
 
 # %%
 input_config_map = data_per_cfg[["inputname", "configurationID"] + measure_names].sort_values(["inputname", "configurationID"]).set_index(["inputname", "configurationID"])
-input_config_map["elapsedtime"] = input_config_map["elapsedtime"].apply(format_time)
 
 all_input_names = {s: i for i, s in enumerate(input_config_map.index.get_level_values("inputname").unique())}
 all_config_ids = {s: i for i, s in enumerate(input_config_map.index.get_level_values("configurationID").unique())}
@@ -103,25 +105,83 @@ len(all_input_names), len(all_config_ids), measurements.shape
 
 # %%
 
-# 201 configurations, 1397 inputs
+# Rank-based distance matrix
+
+# Function to calculate Pearson correlation coefficient in a vectorized manner
+def pearson_correlation(X, Y):
+    mean_X = np.mean(X, axis=-1, keepdims=True)
+    mean_Y = np.mean(Y, axis=-1, keepdims=True)
+    numerator = np.sum((X - mean_X) * (Y - mean_Y), axis=-1)
+    denominator = np.sqrt(np.sum((X - mean_X)**2, axis=-1) * np.sum((Y - mean_Y)**2, axis=-1))
+    return numerator / denominator
+
+
+def spearman_rank_distance(measurements):
+    # Vectorized spearmanr with multiple measurements
+
+    ranks = np.argsort(measurements, axis=1)
+    
+    # The ranks array is 3D (A, B, C), and we need to expand it to 4D for pairwise comparison in A, while keeping C
+    expanded_rank_X_3d = ranks[:, np.newaxis, :, :]  # Expanding for A dimension
+    expanded_rank_Y_3d = ranks[np.newaxis, :, :, :]  # Expanding for A dimension
+
+    A = ranks.shape[0]
+    C = ranks.shape[2]
+
+    # Initialize the Spearman correlation matrix for each C
+    spearman_correlation_matrix_3d = np.empty((A, A, C))
+
+    # Calculate Spearman correlation matrix for each C
+    for c in range(C):
+        spearman_correlation_matrix_3d[:, :, c] = pearson_correlation(
+            expanded_rank_X_3d[:, :, :, c],
+            expanded_rank_Y_3d[:, :, :, c]
+        )
+
+    return spearman_correlation_matrix_3d
+
+def rank_difference_distance(measurements):
+    ranks = np.argsort(measurements, axis=1)
+    expanded_ranks = ranks[:, np.newaxis, :, :] - ranks[np.newaxis, :, :, :]
+
+    # Calculate the absolute differences and sum along the B dimension
+    vectorized_distance_matrix = np.sum(np.abs(expanded_ranks), axis=2)
+    return vectorized_distance_matrix
+
+# Ranking along the B dimension
+# Here, we use the numeric value for ranking
+# ranks = np.argsort(measurements, axis=1)
+
+# # Initialize an empty distance matrix
+# distance_matrix = np.zeros((measurements.shape[0], measurements.shape[0]))
+
+# # Calculate the distance matrix
+# for i in range(measurements.shape[0]):
+#     for j in range(i, measurements.shape[0]):
+#     # for j in range(measurements.shape[0]):
+#         distance_matrix[i, j] = np.sum(np.abs(ranks[i, :, 0] - ranks[j, :, 0]))
+#         # distance_matrix[i, j] = stats.spearmanr(ranks[i, :, 0], ranks[j, :, 0]).statistic
+#         distance_matrix[j, i] = distance_matrix[i, j]
+
+# distance_matrix, ranks.squeeze() # Displaying the distance matrix and the ranks for reference
+
+# %%
+
+# x264
+# 201 configurations, 1397 inputs without input properties
+# 201 configurations, 1287 input with input properties
 
 # 1. We need the ranks of the configs per input
 perf_matrix[["fps_rank", "kbs_rank"]] = perf_matrix[["inputname", "fps", "kbs"]].groupby("inputname").rank()
 
 mean_ranks = perf_matrix[["configurationID", "fps_rank", "kbs_rank"]].groupby("configurationID").mean()
 
-# Comparing the ranks between two inputs:
-# a) Higher emphasis on first ranks (= best configurations)
-# 
-# Do we first rank each performance criterion individually and then calculate the distance over the individual rank comparisons?
-# Metrics: weighted disagreement in config ids? (not meaningful due to large number), weighted distance in ranks?
-# How would we rank all criteria without imposing an order?
 
 # %%
 def distance_matrix_by_first_axis(array):
     reshaped_array = array.reshape(array.shape[0], -1)
-    pairwise_distances = cdist(reshaped_array, reshaped_array)
-    return pairwise_distances
+    pairdist = cdist(reshaped_array, reshaped_array)
+    return pairdist
 
 def get_configuration_distances(measurements):
     return distance_matrix_by_first_axis(measurements)
@@ -129,8 +189,7 @@ def get_configuration_distances(measurements):
 def get_input_distances(measurements):
     return distance_matrix_by_first_axis(np.moveaxis(measurements, 0, 1))
 
-# %%
-get_configuration_distances(measurements).mean(), get_input_distances(measurements).mean()
+# get_configuration_distances(measurements).mean(), get_input_distances(measurements).mean()
 
 # %%
 reshaped_array = measurements.reshape(measurements.shape[0], -1)
@@ -169,3 +228,5 @@ def plot_dendrogram(model, **kwargs):
 plot_dendrogram(model, truncate_mode="level", p=20, color_threshold=0.01)
 
 
+
+# %%
