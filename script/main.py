@@ -13,7 +13,7 @@ import cluster
 ###the file is supposed to be a csv file that contains configurations of systems and performance measures over an execution
 ###return the number of line in the file and the data stored in the file
 def load_csv(path, filename, with_name=False):
-    filename = path + filename
+    filename = os.path.join(path, filename)
     data = pd.read_csv(filename, header=0)
 
     if with_name:
