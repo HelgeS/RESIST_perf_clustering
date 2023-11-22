@@ -22,3 +22,24 @@ _scripts_ gathers the different scripts that were developed to apply clustering 
 The scripts rely on the structure of the csv files and try to be as customizable as possible to try different parameter combinations from the clustering technique.
 
 _results_ can be used to store dendograms from the different clustering configurations that were tried.
+
+## Preliminary Results
+
+### Configuration Recommendation from Nearest Neighbours in Input Feature Space
+
+We look-up the k-nearest neighbour to an input and recommend that configuration that has the best average rank for these k inputs.
+We then check how well this configuration performs for the input in terms of which rank it has (out of 201) and the MAPE (mean absolute percentage error).
+The performance measure considered is the `elapsedtime`.
+Nearest neighbour search is performed via the input features.
+Validation is performed on 15% (194/1287 inputs) hold-out data (no cross-validation or control for randomness yet).
+
+```
+Avg. rank of 1 best recommended configuration: 8.67
+Avg. MAPE of 1 best recommended configuration: 0.08
+Avg. rank of 3 best recommended configuration: 3.39
+Avg. MAPE of 3 best recommended configuration: 0.03
+Avg. rank of 5 best recommended configuration: 2.46
+Avg. MAPE of 5 best recommended configuration: 0.02
+Avg. rank of 10 best recommended configuration: 1.36
+Avg. MAPE of 10 best recommended configuration: 0.01
+```
