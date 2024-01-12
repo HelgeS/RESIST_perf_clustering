@@ -29,16 +29,21 @@ rank_map = input_config_map.groupby("inputname").transform(
 ## This implements a cache for the correlation calculation
 # TODO We can precalculate it for the whole dataset and then index appropriately
 
+
 # Inputs
 def calc_corr_inp(inp1, inp2):
-    return tuple(sorted((inp1, inp2))), rank_map.loc[inp1].corrwith(
-        rank_map.loc[inp2])
+    return tuple(sorted((inp1, inp2))), rank_map.loc[inp1].corrwith(rank_map.loc[inp2])
+
 
 inpcombs = math.comb(len(all_input_names), 2)
 print(f"Inputs ({inpcombs})")
 inpcorrs = {}
-for k, v in Parallel(n_jobs=-1, verbose=10)(delayed(calc_corr_inp)(inp1, inp2) for inp1, inp2 in itertools.combinations(all_input_names, 2)):
+for k, v in Parallel(n_jobs=-1, verbose=10)(
+    delayed(calc_corr_inp)(inp1, inp2)
+    for inp1, inp2 in itertools.combinations(all_input_names, 2)
+):
     inpcorrs[k] = v
+
 
 # Configurations
 def calc_corr_cfg(cfg1, cfg2):
@@ -46,11 +51,21 @@ def calc_corr_cfg(cfg1, cfg2):
         rank_map.xs(cfg2, level=1)
     )
 
+
 cfgcombs = math.comb(len(all_config_ids), 2)
 print(f"Configurations ({cfgcombs})")
 cfgcorrs = {}
-for k, v in Parallel(n_jobs=-1, verbose=10)(delayed(calc_corr_cfg)(cfg1, cfg2) for cfg1, cfg2 in itertools.combinations(all_config_ids, 2)):
+for k, v in Parallel(n_jobs=-1, verbose=10)(
+    delayed(calc_corr_cfg)(cfg1, cfg2)
+    for cfg1, cfg2 in itertools.combinations(all_config_ids, 2)
+):
     cfgcorrs[k] = v
 
-pickle.dump({"dataset": "x264","input_correlations": inpcorrs, "config_correlations": cfgcorrs}, 
-            open("data/x264_correlations.p", "wb"))
+pickle.dump(
+    {
+        "dataset": "x264",
+        "input_correlations": inpcorrs,
+        "config_correlations": cfgcorrs,
+    },
+    open("data/x264_correlations.p", "wb"),
+)
