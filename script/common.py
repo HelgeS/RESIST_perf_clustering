@@ -113,6 +113,8 @@ def load_x264(data_dir="../data/"):
         "fps"
     ]  # fps is the only increasing performance measure
 
+    # We can replace this with a pipeline?
+    # Technically, we should do preprocessing after train/val split
     input_features = (
         perf_matrix[["inputname"] + input_columns_cont]
         .join(pd.get_dummies(perf_matrix[input_columns_cat]))
@@ -476,17 +478,17 @@ def evaluate_ii(
 
     # Foreach close input
     max_r = np.max(n_recs)
-    top_r_cfgs_per_neighbor = []
+    top_r_ranks_per_neighbor = []
     top_r_regret_per_neighbor = []
     for r in top_inp:
-        top_r_cfgs_per_neighbor.append(
+        top_r_ranks_per_neighbor.append(
             torch.topk(rank_arr[r, :], k=max_r, dim=1, largest=False).indices
         )
         top_r_regret_per_neighbor.append(
             torch.topk(regret_arr[r, :], k=max_r, dim=1, largest=False).values
         )
 
-    top_r_cfgs_per_neighbor = torch.stack(top_r_cfgs_per_neighbor)
+    top_r_ranks_per_neighbor = torch.stack(top_r_ranks_per_neighbor)
     top_r_regret_per_neighbor = torch.stack(top_r_regret_per_neighbor)
 
     share_ratios = torch.empty(len(n_recs))
@@ -496,13 +498,13 @@ def evaluate_ii(
 
     for i, r in enumerate(n_recs):
         # Ix(k*r) -> r highest ranked configs * k neighbors
-        reduced_top_r_cfgs = top_r_cfgs_per_neighbor[:, :, :r].reshape(n_queries, -1)
+        reduced_top_r = top_r_ranks_per_neighbor[:, :, :r].reshape(n_queries, -1)
 
         # Look-up the regret of the recommended configs on the query input
         # Per input take the best regret and the average over all query inputs
         best_regret[i] = (
             torch.tensor(
-                [regret_arr[j, cfgs].min() for j, cfgs in enumerate(reduced_top_r_cfgs)]
+                [regret_arr[j, cfgs].min() for j, cfgs in enumerate(reduced_top_r)]
             ).mean()
             * 100
         )
@@ -510,10 +512,7 @@ def evaluate_ii(
         best_rank[i] = (
             (
                 torch.tensor(
-                    [
-                        rank_arr[j, cfgs].min()
-                        for j, cfgs in enumerate(reduced_top_r_cfgs)
-                    ],
+                    [rank_arr[j, cfgs].min() for j, cfgs in enumerate(reduced_top_r)],
                     dtype=torch.float,
                 ).mean()
                 - 1
@@ -524,13 +523,11 @@ def evaluate_ii(
 
         # We must have at least r x num configs unique elements
         count_offset = n_queries * r
-        uniq_vals = torch.tensor(
-            [torch.unique(row).numel() for row in reduced_top_r_cfgs]
-        )
+        uniq_vals = torch.tensor([torch.unique(row).numel() for row in reduced_top_r])
         share_ratios[i] = (
             1
             - (torch.sum(uniq_vals) - count_offset)
-            / (reduced_top_r_cfgs.numel() - count_offset)
+            / (reduced_top_r.numel() - count_offset)
         ) * 100
 
     return best_rank, best_regret, share_ratios
@@ -577,33 +574,27 @@ def evaluate_cc(
     top_r_regret_per_neighbor = torch.stack(top_r_regret_per_neighbor)
 
     share_ratios = torch.empty(len(n_recs))
-    mean_regret = torch.empty(len(n_recs))
-    mean_rank = torch.empty(len(n_recs))
+    best_regret = torch.empty(len(n_recs))
+    best_rank = torch.empty(len(n_recs))
     n_queries = top_cfg.shape[0]
 
     for i, r in enumerate(n_recs):
         # Cx(k*r) -> r highest ranked inputs * k neighbors
-        reduced_top_r_inps = top_r_ranks_per_neighbor[:, :r, :].reshape(n_queries, -1)
+        reduced_top_r = top_r_ranks_per_neighbor[:, :r, :].reshape(n_queries, -1)
 
         # Look-up the regret of the recommended configs on the query input
         # Per input take the best regret and the average over all query inputs
-        mean_regret[i] = (
+        best_regret[i] = (
             torch.tensor(
-                [
-                    regret_arr[inps, j].mean()
-                    for j, inps in enumerate(reduced_top_r_inps)
-                ]
+                [regret_arr[inps, j].min() for j, inps in enumerate(reduced_top_r)]
             ).mean()
             * 100
         )
 
-        mean_rank[i] = (
+        best_rank[i] = (
             (
                 torch.tensor(
-                    [
-                        rank_arr[inps, j].float().mean()
-                        for j, inps in enumerate(reduced_top_r_inps)
-                    ],
+                    [rank_arr[inps, j].min() for j, inps in enumerate(reduced_top_r)],
                     dtype=torch.float,
                 ).mean()
                 - 1
@@ -614,16 +605,14 @@ def evaluate_cc(
 
         # We must have at least r x num inputs unique elements
         count_offset = n_queries * r
-        uniq_vals = torch.tensor(
-            [torch.unique(row).numel() for row in reduced_top_r_inps]
-        )
+        uniq_vals = torch.tensor([torch.unique(row).numel() for row in reduced_top_r])
         share_ratios[i] = (
             1
             - (torch.sum(uniq_vals) - count_offset)
-            / (reduced_top_r_inps.numel() - count_offset)
+            / (reduced_top_r.numel() - count_offset)
         ) * 100
 
-    return mean_rank, mean_regret, share_ratios
+    return best_rank, best_regret, share_ratios
 
 
 def prepare_result_df(results, topr_values, topk_values, extra_info={}):
