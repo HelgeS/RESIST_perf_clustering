@@ -1,135 +1,77 @@
+import json
+import os
+
+import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split, KFold
 import torch
 import torch.nn.functional as F
 from main import load_all_csv
-import numpy as np
-import os
-import datetime
 from scipy import stats
+from sklearn.model_selection import KFold, train_test_split
 
 
-def format_time(s):
-    dtf = datetime.time.fromisoformat("00:0" + s.strip())
-    return dtf.minute * 60 + dtf.second + dtf.microsecond / 1_000_000
+def load_data(system, data_dir="../data"):
+    if system == "nodejs":
+        raise NotImplementedError(
+            "We don't support nodejs / it's missing the configurationID in the measurements"
+        )
 
-
-def load_x264(data_dir="../data/"):
-    input_columns = [
-        "category",
-        "resolution",
-        "WIDTH",
-        "HEIGHT",
-        "SPATIAL_COMPLEXITY",
-        "TEMPORAL_COMPLEXITY",
-        "CHUNK_COMPLEXITY_VARIATION",
-        "COLOR_COMPLEXITY",
-    ]
-    input_columns_cat = ["category"]
-    input_columns_cont = [s for s in input_columns if s not in input_columns_cat]
-
-    config_columns = [
-        "cabac",
-        "ref",
-        "deblock",
-        "analyse",
-        "me",
-        "subme",
-        "mixed_ref",
-        "me_range",
-        "trellis",
-        "8x8dct",
-        "fast_pskip",
-        "chroma_qp_offset",
-        "bframes",
-        "b_pyramid",
-        "b_adapt",
-        "direct",
-        "weightb",
-        "open_gop",
-        "weightp",
-        "scenecut",
-        "rc_lookahead",
-        "mbtree",
-        "qpmax",
-        "aq-mode",
-    ]
-    config_columns_cat = [
-        "analyse",
-        "me",
-        "direct",
-        "deblock",
-        "b_adapt",
-        "b_pyramid",
-        "open_gop",
-        "rc_lookahead",
-        "scenecut",
-        "weightb",
-    ]
-    config_columns_cont = [s for s in config_columns if s not in config_columns_cat]
-
-    all_performances = [
-        # "rel_size",  # after preprocessing, before just `size` - min
-        "usertime",
-        "systemtime",
-        "elapsedtime",
-        "cpu",
-        # "frames",  # irrelevant?
-        "fps",  # max
-        "kbs",
-        "rel_kbs",
-    ]
-    # True - higher is better
-    # increasing_performances = {
-    #     "rel_size": False,
-    #     "usertime": False,
-    #     "systemtime": False,
-    #     "elapsedtime": False,
-    #     "cpu": False,
-    #     "fps": True,
-    #     "kbs": False,
-    #     "rel_kbs": False,
-    # }
-
-    # metadata = {}
+    metadata = json.load(open(os.path.join(data_dir, "metadata.json")))
+    system_metadata = metadata[system]
+    config_columns = system_metadata["config_columns"]
+    config_columns_cat = system_metadata["config_columns_cat"]
+    config_columns_cont = system_metadata["config_columns_cont"]
+    # input_columns = system_metadata["input_columns"]
+    input_columns_cat = system_metadata["input_columns_cat"]
+    input_columns_cont = system_metadata["input_columns_cont"]
+    performances = system_metadata["performances"]
 
     meas_matrix, _ = load_all_csv(
-        os.path.join(data_dir, "x264"), ext="csv", with_names=True
+        os.path.join(data_dir, system), ext="csv", with_names=True
     )
-    meas_matrix["elapsedtime"] = meas_matrix["elapsedtime"].apply(format_time)
     input_properties = pd.read_csv(
-        os.path.join(data_dir, "x264", "others", "properties.csv")
-    )  # Does not match all inputs from perf_matrix?
-    del input_properties["id"]
+        os.path.join(data_dir, system, "others", "properties.csv"),
+        dtype={"name": "object"},
+    ).set_index("id")  # id needed?
+
+    # Rename columns with same name in inputs/perf. prediction to avoid errors later
+    # Affects imagemagick
+    for c in input_properties.columns:
+        if c in performances or c in config_columns:
+            input_properties.rename(columns={c: f"inp_{c}"}, inplace=True)
 
     perf_matrix = pd.merge(
         meas_matrix, input_properties, left_on="inputname", right_on="name"
     ).sort_values(by=["inputname", "configurationID"])
     del perf_matrix["name"]
-    # perf_matrix["rel_size"] = perf_matrix["size"] / perf_matrix["ORIG_SIZE"]  # We have `kbs` which is a better alternative
-    # perf_matrix["rel_size"] = np.log(perf_matrix["rel_size"])  # To scale value distribution more evenly
-    perf_matrix["rel_kbs"] = perf_matrix["kbs"] / perf_matrix["ORIG_BITRATE"]
-    perf_matrix["fps"] = -perf_matrix[
-        "fps"
-    ]  # fps is the only increasing performance measure
 
-    # We can replace this with a pipeline?
-    # Technically, we should do preprocessing after train/val split
-    input_features = (
-        perf_matrix[["inputname"] + input_columns_cont]
-        .join(pd.get_dummies(perf_matrix[input_columns_cat]))
-        .set_index("inputname")
-        .drop_duplicates()
-    )
+    # System-specific adjustments
+    # TODO Could be made part of the preprocessed datasets
+    if system == "x264":
+        # perf_matrix["rel_size"] = perf_matrix["size"] / perf_matrix["ORIG_SIZE"]  # We have `kbs` which is a better alternative
+        # perf_matrix["rel_size"] = np.log(perf_matrix["rel_size"])  # To scale value distribution more evenly
+        perf_matrix["rel_kbs"] = perf_matrix["kbs"] / perf_matrix["ORIG_BITRATE"]
+        perf_matrix["fps"] = -perf_matrix[
+            "fps"
+        ]  # fps is the only increasing performance measure
 
-    config_features = (
-        perf_matrix[["configurationID"] + config_columns_cont]
-        .join(pd.get_dummies(perf_matrix[config_columns_cat]))
-        .set_index("configurationID")
-        .drop_duplicates()
-    )
+    input_features = perf_matrix[["inputname"] + input_columns_cont]
+    if len(input_columns_cat) > 0:
+        input_features = input_features.join(
+            pd.get_dummies(perf_matrix[input_columns_cat])
+        )
 
-    return perf_matrix, input_features, config_features, all_performances
+    input_features = input_features.set_index("inputname").drop_duplicates()
+
+    config_features = perf_matrix[["configurationID"] + config_columns_cont]
+    if len(config_columns_cat) > 0:
+        config_features = config_features.join(
+            pd.get_dummies(perf_matrix[config_columns_cat])
+        )
+
+    config_features = config_features.set_index("configurationID").drop_duplicates()
+
+    return perf_matrix, input_features, config_features, performances
 
 
 def split_data(perf_matrix, test_size=0.2, verbose=True, random_state=None):

@@ -1,0 +1,371 @@
+{
+    "gcc": {
+        "config_columns": [
+            "optim",
+            "-floop-interchange",
+            "-fprefetch-loop-arrays",
+            "-ffloat-store",
+            "-fno-asm"
+        ],
+        "config_columns_cat": [
+            "optim"
+        ],
+        "config_columns_cont": [
+            "-floop-interchange",
+            "-fprefetch-loop-arrays",
+            "-ffloat-store",
+            "-fno-asm"
+        ],
+        "input_columns": [
+            "csize",
+            "#LOCs",
+            "number_literal",
+            "for_statement",
+            "if_statement"
+        ],
+        "input_columns_cat": [],
+        "input_columns_cont": [
+            "csize",
+            "#LOCs",
+            "number_literal",
+            "for_statement",
+            "if_statement"
+        ],
+        "performances": [
+            "size",
+            "ctime",
+            "exec"
+        ]
+    },
+    "imagemagick": {
+        "config_columns": [
+            "memory_r",
+            "posterize_r",
+            "gaussian-blur",
+            "thread",
+            "quality"
+        ],
+        "config_columns_cat": [],
+        "config_columns_cont": [
+            "memory_r",
+            "posterize_r",
+            "gaussian-blur",
+            "thread",
+            "quality"
+        ],
+        "input_columns": [
+            "size",
+            "height",
+            "width",
+            "description",
+            "rpix",
+            "gpix",
+            "bpix"
+        ],
+        "input_columns_cat": [
+            "description"
+        ],
+        "input_columns_cont": [
+            "size",
+            "height",
+            "width",
+            "rpix",
+            "gpix",
+            "bpix"
+        ],
+        "performances": [
+            "size",
+            "time"
+        ]
+    },
+    "lingeling": {
+        "config_columns": [
+            "--boost",
+            "--carduse",
+            "--decompose",
+            "--gluescale",
+            "--lkhd",
+            "--memlim",
+            "--minimize",
+            "--prbsimple",
+            "--sweepirr",
+            "--sweepred"
+        ],
+        "config_columns_cat": [],
+        "config_columns_cont": [
+            "--boost",
+            "--carduse",
+            "--decompose",
+            "--gluescale",
+            "--lkhd",
+            "--memlim",
+            "--minimize",
+            "--prbsimple",
+            "--sweepirr",
+            "--sweepred"
+        ],
+        "input_columns": [
+            "nbOR",
+            "nbAND",
+            "nbVAR",
+            "size"
+        ],
+        "input_columns_cat": [],
+        "input_columns_cont": [
+            "nbOR",
+            "nbAND",
+            "nbVAR",
+            "size"
+        ],
+        "performances": [
+            "conflicts",
+            "cps",
+            "reductions"
+        ]
+    },
+    "nodejs": {
+        "config_columns": [
+            "--jitless",
+            "--experimental-wasm-modules",
+            "--experimental-vm-modules",
+            "--preserve-symlinks-main",
+            "--no-warnings",
+            "--node-memory-debug"
+        ],
+        "config_columns_cat": [],
+        "config_columns_cont": [
+            "--jitless",
+            "--experimental-wasm-modules",
+            "--experimental-vm-modules",
+            "--preserve-symlinks-main",
+            "--no-warnings",
+            "--node-memory-debug"
+        ],
+        "input_columns": [
+            "csize",
+            "#LOCs",
+            "variable_declarator",
+            "for_statement",
+            "if_statement",
+            "function_declaration"
+        ],
+        "input_columns_cat": [],
+        "input_columns_cont": [
+            "csize",
+            "#LOCs",
+            "variable_declarator",
+            "for_statement",
+            "if_statement",
+            "function_declaration"
+        ],
+        "performances": [
+            "ops"
+        ]
+    },
+    "poppler": {
+        "config_columns": [
+            "format",
+            "j",
+            "jp2",
+            "jbig2",
+            "ccitt"
+        ],
+        "config_columns_cat": [
+            "format"
+        ],
+        "config_columns_cont": [
+            "j",
+            "jp2",
+            "jbig2",
+            "ccitt"
+        ],
+        "input_columns": [
+            "pdfsize",
+            "hpage",
+            "wpage",
+            "nbpages",
+            "imagesize",
+            "nbimage"
+        ],
+        "input_columns_cat": [],
+        "input_columns_cont": [
+            "pdfsize",
+            "hpage",
+            "wpage",
+            "nbpages",
+            "imagesize",
+            "nbimage"
+        ],
+        "performances": [
+            "size",
+            "time"
+        ]
+    },
+    "sqlite": {
+        "config_columns": [
+            "-deserialize",
+            "-memtrace",
+            "-maxsize",
+            "-append",
+            "-output"
+        ],
+        "config_columns_cat": [],
+        "config_columns_cont": [
+            "-deserialize",
+            "-memtrace",
+            "-maxsize",
+            "-append",
+            "-output"
+        ],
+        "input_columns": [
+            "tab1",
+            "tab2",
+            "tab4",
+            "tab5",
+            "tab6",
+            "tab8"
+        ],
+        "input_columns_cat": [],
+        "input_columns_cont": [
+            "tab1",
+            "tab2",
+            "tab4",
+            "tab5",
+            "tab6",
+            "tab8"
+        ],
+        "performances": [
+            "q1",
+            "q2",
+            "q3",
+            "q4",
+            "q5",
+            "q6",
+            "q7",
+            "q8",
+            "q9",
+            "q10",
+            "q11",
+            "q12",
+            "q13",
+            "q14",
+            "q15"
+        ]
+    },
+    "x264": {
+        "config_columns": [
+            "cabac",
+            "ref",
+            "deblock",
+            "analyse",
+            "me",
+            "subme",
+            "mixed_ref",
+            "me_range",
+            "trellis",
+            "8x8dct",
+            "fast_pskip",
+            "chroma_qp_offset",
+            "bframes",
+            "b_pyramid",
+            "b_adapt",
+            "direct",
+            "weightb",
+            "open_gop",
+            "weightp",
+            "scenecut",
+            "rc_lookahead",
+            "mbtree",
+            "qpmax",
+            "aq-mode"
+        ],
+        "config_columns_cat": [
+            "analyse",
+            "me",
+            "direct",
+            "deblock",
+            "b_adapt",
+            "b_pyramid",
+            "open_gop",
+            "rc_lookahead",
+            "scenecut",
+            "weightb"
+        ],
+        "config_columns_cont": [
+            "cabac",
+            "ref",
+            "subme",
+            "mixed_ref",
+            "me_range",
+            "trellis",
+            "8x8dct",
+            "fast_pskip",
+            "chroma_qp_offset",
+            "bframes",
+            "weightp",
+            "mbtree",
+            "qpmax",
+            "aq-mode"
+        ],
+        "input_columns": [
+            "category",
+            "resolution",
+            "WIDTH",
+            "HEIGHT",
+            "SPATIAL_COMPLEXITY",
+            "TEMPORAL_COMPLEXITY",
+            "CHUNK_COMPLEXITY_VARIATION",
+            "COLOR_COMPLEXITY"
+        ],
+        "input_columns_cat": [
+            "category"
+        ],
+        "input_columns_cont": [
+            "resolution",
+            "WIDTH",
+            "HEIGHT",
+            "SPATIAL_COMPLEXITY",
+            "TEMPORAL_COMPLEXITY",
+            "CHUNK_COMPLEXITY_VARIATION",
+            "COLOR_COMPLEXITY"
+        ],
+        "performances": [
+            "usertime",
+            "systemtime",
+            "etime",
+            "cpu",
+            "fps",
+            "kbs"
+        ]
+    },
+    "xz": {
+        "config_columns": [
+            "memory",
+            "format",
+            "level",
+            "depth"
+        ],
+        "config_columns_cat": [
+            "memory",
+            "format"
+        ],
+        "config_columns_cont": [
+            "level",
+            "depth"
+        ],
+        "input_columns": [
+            "size",
+            "type"
+        ],
+        "input_columns_cat": [
+            "type"
+        ],
+        "input_columns_cont": [
+            "size"
+        ],
+        "performances": [
+            "size",
+            "time"
+        ]
+    }
+}

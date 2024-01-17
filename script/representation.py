@@ -1,23 +1,24 @@
 # %%
-import torch
-from torch import nn
-import torch.nn.functional as F
+import copy
+import itertools
+import os
+import pickle
+
 import numpy as np
 import pandas as pd
-import itertools
-from scipy import stats
+import torch
+import torch.nn.functional as F
 from common import (
-    split_data,
-    load_x264,
+    evaluate_cc,
     evaluate_ic,
     evaluate_ii,
-    split_data_cv,
-    evaluate_cc,
+    load_data,
     prepare_result_df,
+    split_data,
+    split_data_cv,
 )
-import pickle
-import os
-import copy
+from scipy import stats
+from torch import nn
 
 # Purpose of this file
 # We learn a simple embedding of the input and configuration vectors
@@ -39,12 +40,14 @@ import copy
 # %%
 ## Load and prepare data
 data_dir = "../data"
-perf_matrix, input_features, config_features, all_performances = load_x264(
-    data_dir=data_dir
+system = "x264"
+
+perf_matrix, input_features, config_features, all_performances = load_data(
+    system=system, data_dir=data_dir
 )
 performances = ["rel_kbs"]
 
-print("Loaded data x264")
+print(f"Loaded data {system}")
 print(f"perf_matrix:{perf_matrix.shape}")
 print(f"input_features:{input_features.shape}")
 print(f"config_features:{config_features.shape}")
@@ -500,7 +503,7 @@ def train_model(
 
 
 # %%
-
+# def evaluate_cross_validation():
 dfs = []
 random_seed = 59590  # 33154
 
@@ -822,8 +825,8 @@ print(
 # %%
 
 from sklearn.metrics import mean_absolute_percentage_error
-from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler
 
 td = data_split["train_data"]
 indices = np.vstack(
@@ -834,11 +837,7 @@ indices = np.vstack(
 ).T
 
 scaler = StandardScaler()
-y = scaler.fit_transform(
-    td[performances[0]].values.reshape(
-        -1,1
-    )
-)
+y = scaler.fit_transform(td[performances[0]].values.reshape(-1, 1))
 
 with torch.no_grad():
     X = torch.concat(
