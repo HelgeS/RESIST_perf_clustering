@@ -49,11 +49,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("system")
 parser.add_argument("-p", "--performance")
 parser.add_argument("-m", "--method", default="embed", choices=["embed", "pca", "tsne"])
-parser.add_argument("-d", "--dimensions", help="Embedding dimensions", default=32)
+parser.add_argument("-d", "--dimensions", help="Embedding dimensions", default=32, type=int)
 parser.add_argument("--data-dir", default="../data")
-parser.add_argument("-o", "--output", default="results/")
+parser.add_argument("-o", "--output", default="../results/")
 
-args = parser.parse_args(["poppler", "--data-dir", "data/"])
+# args = parser.parse_args(["poppler", "--data-dir", "data/"])
+args = parser.parse_args()
 
 data_dir = args.data_dir
 system = args.system
