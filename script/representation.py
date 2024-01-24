@@ -87,7 +87,7 @@ all_config_ids = pd.Series(
 )
 
 regret_map = input_config_map.groupby("inputname").transform(
-    lambda x: (x - x.min()).abs() / abs(x.min())
+    lambda x: (x - x.min()) / (x.max() - x.min())
 )
 average_regret = regret_map.mean(axis=1)
 
