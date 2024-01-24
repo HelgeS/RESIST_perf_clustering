@@ -19,6 +19,8 @@ from common import (
 )
 from scipy import stats
 from torch import nn
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 
 # Purpose of this file
 # We learn a simple embedding of the input and configuration vectors
@@ -541,34 +543,42 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
     train_input_arr = input_arr[train_input_mask]
     train_config_arr = config_arr[train_config_mask]
 
-    best_models = train_model(
-        train_inp=train_inp,
-        train_cfg=train_cfg,
-        train_input_arr=train_input_arr,
-        train_config_arr=train_config_arr,
-        rank_map=rank_map,
-        error_regret=regret_map,
-        performance=performances[0],
-    )
-    input_emb, config_emb = best_models
-    input_emb = input_emb.cpu()
-    config_emb = config_emb.cpu()
+    if method == "embed":
+        best_models = train_model(
+            train_inp=train_inp,
+            train_cfg=train_cfg,
+            train_input_arr=train_input_arr,
+            train_config_arr=train_config_arr,
+            rank_map=rank_map,
+            error_regret=regret_map,
+            emb_size=dimensions,
+            performance=performances[0],
+        )
+        input_emb, config_emb = best_models
+        input_emb = input_emb.cpu()
+        config_emb = config_emb.cpu()
 
-    torch.save(
-        {
-            "input_emb": input_emb,
-            "config_emb": config_emb,
-            "train_inp": train_inp,
-            "train_cfg": train_cfg,
-            "test_inp": test_inp,
-            "test_cfg": test_cfg,
-            "split": data_split["split"],
-        },
-        open(f"representation_{data_split['split']}_s{random_seed}.p", "wb"),
-    )
+        torch.save(
+            {
+                "input_emb": input_emb,
+                "config_emb": config_emb,
+                "train_inp": train_inp,
+                "train_cfg": train_cfg,
+                "test_inp": test_inp,
+                "test_cfg": test_cfg,
+                "split": data_split["split"],
+            },
+            open(f"representation_{data_split['split']}_s{random_seed}.p", "wb"),
+        )
 
-    input_embeddings = input_emb(input_arr)
-    config_embeddings = config_emb(config_arr)
+        input_embeddings = input_emb(input_arr)
+        config_embeddings = config_emb(config_arr)
+    elif method == "tsne":
+        input_embeddings = TSNE(dimensions).fit_transform(input_arr)
+        config_embeddings = TSNE(dimensions).fit_transform(config_arr)
+    elif method == "pca":
+        input_embeddings = PCA(dimensions).fit_transform(input_arr)
+        config_embeddings = PCA(dimensions).fit_transform(config_arr)
 
     train_cc_rank = []
     train_cc_ratio = []
