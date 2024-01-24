@@ -429,7 +429,7 @@ def evaluate_ii(
     )
 
     # Foreach close input
-    max_r = np.max(n_recs)
+    max_r = np.minimum(np.max(n_recs), rank_arr.shape[1])
     top_r_ranks_per_neighbor = []
     top_r_regret_per_neighbor = []
     for r in top_inp:
@@ -443,12 +443,16 @@ def evaluate_ii(
     top_r_ranks_per_neighbor = torch.stack(top_r_ranks_per_neighbor)
     top_r_regret_per_neighbor = torch.stack(top_r_regret_per_neighbor)
 
-    share_ratios = torch.empty(len(n_recs))
-    best_regret = torch.empty(len(n_recs))
-    best_rank = torch.empty(len(n_recs))
+    share_ratios = torch.zeros(len(n_recs))
+    best_regret = torch.zeros(len(n_recs))
+    best_rank = torch.zeros(len(n_recs))
     n_queries = top_inp.shape[0]
 
     for i, r in enumerate(n_recs):
+        if r > rank_arr.shape[1]:
+            # We can't ask for more neighbors than exist
+            continue
+
         # Ix(k*r) -> r highest ranked configs * k neighbors
         reduced_top_r = top_r_ranks_per_neighbor[:, :, :r].reshape(n_queries, -1)
 
@@ -511,7 +515,7 @@ def evaluate_cc(
     )
 
     # Foreach close config
-    max_r = np.max(n_recs)
+    max_r = np.minimum(np.max(n_recs), rank_arr.shape[1])
     top_r_ranks_per_neighbor = []
     top_r_regret_per_neighbor = []
     for neighbors in top_cfg:
@@ -525,12 +529,16 @@ def evaluate_cc(
     top_r_ranks_per_neighbor = torch.stack(top_r_ranks_per_neighbor)
     top_r_regret_per_neighbor = torch.stack(top_r_regret_per_neighbor)
 
-    share_ratios = torch.empty(len(n_recs))
-    best_regret = torch.empty(len(n_recs))
-    best_rank = torch.empty(len(n_recs))
+    share_ratios = torch.zeros(len(n_recs))
+    best_regret = torch.zeros(len(n_recs))
+    best_rank = torch.zeros(len(n_recs))
     n_queries = top_cfg.shape[0]
 
     for i, r in enumerate(n_recs):
+        if r > rank_arr.shape[1]:
+            # We can't ask for more neighbors than exist
+            continue
+        
         # Cx(k*r) -> r highest ranked inputs * k neighbors
         reduced_top_r = top_r_ranks_per_neighbor[:, :r, :].reshape(n_queries, -1)
 
