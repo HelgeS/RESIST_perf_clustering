@@ -1,6 +1,7 @@
 # %%
 import argparse
 import copy
+import datetime
 import itertools
 import os
 import pickle
@@ -15,13 +16,15 @@ from common import (
     evaluate_ii,
     load_data,
     prepare_result_df,
-    split_data,
     split_data_cv,
 )
 from scipy import stats
-from torch import nn
-from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.metrics import mean_absolute_percentage_error
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler
+from torch import nn
 
 # Purpose of this file
 # We learn a simple embedding of the input and configuration vectors
@@ -48,6 +51,7 @@ parser.add_argument("-p", "--performance")
 parser.add_argument("-m", "--method", default="embed", choices=["embed", "pca", "tsne"])
 parser.add_argument("-d", "--dimensions", help="Embedding dimensions", default=32)
 parser.add_argument("--data-dir", default="../data")
+parser.add_argument("-o", "--output", default="results/")
 
 args = parser.parse_args(["poppler", "--data-dir", "data/"])
 
@@ -56,22 +60,29 @@ system = args.system
 method = args.method
 dimensions = args.dimensions
 
+run_timestamp = datetime.datetime.now().isoformat(timespec="minutes")
+result_dir = os.path.join(
+    args.output, f"{run_timestamp}_{system}_{method}_d{dimensions}"
+)
+os.makedirs(result_dir, exist_ok=True)
+
 assert method not in ("pca", "tsne") or 2 <= dimensions <= 3
 
-perf_matrix, input_features, config_features, all_performances = load_data(
-    system=system, data_dir=data_dir
-)
+(
+    perf_matrix,
+    input_features,
+    config_features,
+    all_performances,
+    input_preprocessor,
+    config_preprocessor,
+) = load_data(system=system, data_dir=data_dir)
 performances = all_performances[0:1] if args.performance is None else [args.performance]
 assert all(p in all_performances for p in performances)
 
-print(f"Loaded data {system}")
+print(f"Loaded data for `{system}`")
 print(f"perf_matrix:{perf_matrix.shape}")
-print(f"input_features:{input_features.shape}")
-print(f"config_features:{config_features.shape}")
-
-data_split = split_data(perf_matrix)
-train_inp = data_split["train_inp"]
-train_cfg = data_split["train_cfg"]
+print(f"input_features(before preprocessing):{input_features.shape}")
+print(f"config_features(before preprocessing):{config_features.shape}")
 
 # This is a look up for performance measurements from inputname + configurationID
 input_config_map = (
@@ -169,16 +180,6 @@ def icc_cmp_fn(inp, cfg1, cfg2, rank_map):
 
 # %%
 
-# Here the actual training setup starts
-
-train_input_arr = torch.from_numpy(input_features.loc[train_inp].values).float()
-train_config_arr = torch.from_numpy(config_features.loc[train_cfg].values).float()
-
-input_map = {s: i for i, s in enumerate(train_inp)}
-config_map = {s: i for i, s in enumerate(train_cfg)}
-
-# %%
-
 
 # TODO Make vectorized version that splits evenly between the tasks
 def make_batch(
@@ -237,7 +238,9 @@ def make_batch(
     )
 
 
-def make_batch_v2(inputs, configs, size, rank_map=None, lookup=None):
+def make_batch_v2(
+    inputs, configs, size, input_map, config_map, rank_map=None, lookup=None
+):
     """This samples a set of `size` inputs + configs and constructs all possible triplets from them."""
     half_size = size // 2
     sampled_ttinp = np.random.choice(inputs, size=half_size, replace=False)
@@ -349,7 +352,7 @@ def train_model(
     num_config_features = train_config_arr.shape[1]
     input_map = {s: i for i, s in enumerate(train_inp)}
     config_map = {s: i for i, s in enumerate(train_cfg)}
-    batch_size = 2048
+    batch_size = 1024
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -374,7 +377,7 @@ def train_model(
     # )
 
     optimizer = torch.optim.AdamW(
-        list(input_emb.parameters()) + list(config_emb.parameters()), lr=0.001
+        list(input_emb.parameters()) + list(config_emb.parameters()), lr=0.0003
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, "min", verbose=True
@@ -547,13 +550,19 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
     test_cfg = data_split["test_cfg"]
 
     # Prepare and select training/test data according to random split
-    input_arr = torch.from_numpy(input_features.values).float()
-    config_arr = torch.from_numpy(config_features.values).float()
     train_input_mask = input_features.index.isin(train_inp)
     test_input_mask = input_features.index.isin(test_inp)
 
     train_config_mask = config_features.index.isin(train_cfg)
     test_config_mask = config_features.index.isin(test_cfg)
+
+    input_preprocessor.fit(input_features[train_input_mask])
+    config_preprocessor.fit(config_features[train_config_mask])
+
+    input_arr = torch.from_numpy(input_preprocessor.transform(input_features)).float()
+    config_arr = torch.from_numpy(
+        config_preprocessor.transform(config_features)
+    ).float()
 
     train_input_arr = input_arr[train_input_mask]
     train_config_arr = config_arr[train_config_mask]
@@ -573,6 +582,9 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
         input_emb = input_emb.cpu()
         config_emb = config_emb.cpu()
 
+        representation_file = os.path.join(
+            result_dir, f"embed_{data_split['split']}_s{random_seed}.p"
+        )
         torch.save(
             {
                 "input_emb": input_emb,
@@ -583,7 +595,7 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
                 "test_cfg": test_cfg,
                 "split": data_split["split"],
             },
-            open(f"representation_{data_split['split']}_s{random_seed}.p", "wb"),
+            open(representation_file, "wb"),
         )
 
         input_embeddings = input_emb(input_arr)
@@ -595,26 +607,31 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
         input_embeddings = PCA(dimensions).fit_transform(input_arr)
         config_embeddings = PCA(dimensions).fit_transform(config_arr)
 
-    train_cc_rank = []
-    train_cc_ratio = []
-    train_cc_regret = []
+    # This is all evaluation
+    train_cc_rank = -1 * np.ones((len(topk_values), len(topr_values)))
+    train_cc_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
+    train_cc_regret = -1 * np.ones((len(topk_values), len(topr_values)))
 
-    test_cc_rank = []
-    test_cc_ratio = []
-    test_cc_regret = []
+    test_cc_rank = -1 * np.ones((len(topk_values), len(topr_values)))
+    test_cc_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
+    test_cc_regret = -1 * np.ones((len(topk_values), len(topr_values)))
 
-    train_ii_rank = []
-    train_ii_ratio = []
-    train_ii_regret = []
+    train_ii_rank = -1 * np.ones((len(topk_values), len(topr_values)))
+    train_ii_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
+    train_ii_regret = -1 * np.ones((len(topk_values), len(topr_values)))
 
-    test_ii_rank = []
-    test_ii_ratio = []
-    test_ii_regret = []
+    test_ii_rank = -1 * np.ones((len(topk_values), len(topr_values)))
+    test_ii_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
+    test_ii_regret = -1 * np.ones((len(topk_values), len(topr_values)))
 
     # Query: test data
     # Database: train data
 
-    for topk in topk_values:
+    for i, topk in enumerate(topk_values):
+        if train_config_mask.sum() < topk or train_input_mask.sum() < topk:
+            # Not enough references to perform evaluation
+            continue
+
         train_cc = evaluate_cc(
             config_embeddings,
             rank_arr=rank_arr,
@@ -624,9 +641,9 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
             query_mask=torch.from_numpy(train_config_mask),
             reference_mask=torch.from_numpy(train_config_mask),
         )
-        train_cc_rank.append(train_cc[0].numpy())
-        train_cc_regret.append(train_cc[1].numpy())
-        train_cc_ratio.append(train_cc[2].numpy())
+        train_cc_rank[i, :] = train_cc[0].numpy()
+        train_cc_regret[i, :] = train_cc[1].numpy()
+        train_cc_ratio[i, :] = train_cc[2].numpy()
 
         test_cc = evaluate_cc(
             config_embeddings,
@@ -637,9 +654,9 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
             query_mask=torch.from_numpy(test_config_mask),
             reference_mask=torch.from_numpy(train_config_mask),
         )
-        test_cc_rank.append(test_cc[0].numpy())
-        test_cc_regret.append(test_cc[1].numpy())
-        test_cc_ratio.append(test_cc[2].numpy())
+        test_cc_rank[i, :] = test_cc[0].numpy()
+        test_cc_regret[i, :] = test_cc[1].numpy()
+        test_cc_ratio[i, :] = test_cc[2].numpy()
 
         train_ii = evaluate_ii(
             input_embeddings,
@@ -650,9 +667,9 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
             query_mask=torch.from_numpy(train_input_mask),
             reference_mask=torch.from_numpy(train_input_mask),
         )
-        train_ii_rank.append(train_ii[0].numpy())
-        train_ii_regret.append(train_ii[1].numpy())
-        train_ii_ratio.append(train_ii[2].numpy())
+        train_ii_rank[i, :] = train_ii[0].numpy()
+        train_ii_regret[i, :] = train_ii[1].numpy()
+        train_ii_ratio[i, :] = train_ii[2].numpy()
 
         test_ii = evaluate_ii(
             input_embeddings,
@@ -663,9 +680,9 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
             query_mask=torch.from_numpy(test_input_mask),
             reference_mask=torch.from_numpy(train_input_mask),
         )
-        test_ii_rank.append(test_ii[0].numpy())
-        test_ii_regret.append(test_ii[1].numpy())
-        test_ii_ratio.append(test_ii[2].numpy())
+        test_ii_rank[i, :] = test_ii[0].numpy()
+        test_ii_regret[i, :] = test_ii[1].numpy()
+        test_ii_ratio[i, :] = test_ii[2].numpy()
 
     dfs.append(
         prepare_result_df(
@@ -769,6 +786,7 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
 
 full_df = pd.concat(dfs)
 full_df.groupby(["mode", "split", "metric", "k"]).mean()
+full_df.to_csv(os.path.join(result_dir, "full_df.csv"))
 
 # %%
 
@@ -808,6 +826,13 @@ m = pd.concat(
     keys=["rank", "ratio", "regret"],
 )
 print(m.to_latex(index=True, float_format="%.2f", na_rep="-", caption="Input-Input"))
+m.to_latex(
+    buf=os.path.join(result_dir, "input_input.tex"),
+    index=True,
+    float_format="%.2f",
+    na_rep="-",
+    caption="Input-Input",
+)
 
 # %%
 
@@ -846,12 +871,15 @@ print(
         caption="Configuration-Configuration",
     )
 )
+m.to_latex(
+    buf=os.path.join(result_dir, "config_config.tex"),
+    index=True,
+    float_format="%.2f",
+    na_rep="-",
+    caption="Configuration-Configuration",
+)
 
 # %%
-
-from sklearn.metrics import mean_absolute_percentage_error
-from sklearn.neural_network import MLPRegressor
-from sklearn.preprocessing import StandardScaler
 
 td = data_split["train_data"]
 indices = np.vstack(
@@ -873,6 +901,8 @@ with torch.no_grad():
         dim=1,
     ).numpy()
 
+print("Embedded features")
+
 m = MLPRegressor(hidden_layer_sizes=(64,), verbose=True)
 m.fit(X, y.ravel())
 print("Train score", m.score(X, y))
@@ -888,6 +918,10 @@ X = torch.concat(
     ),
     dim=1,
 ).numpy()
+
+
+print("Original features")
+
 m = MLPRegressor(hidden_layer_sizes=(64,), verbose=True)
 m.fit(X, y.ravel())
 print("Train score", m.score(X, y))

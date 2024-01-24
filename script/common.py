@@ -3,11 +3,14 @@ import os
 
 import numpy as np
 import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.discriminant_analysis import StandardScaler
 import torch
 import torch.nn.functional as F
 from main import load_all_csv
 from scipy import stats
 from sklearn.model_selection import KFold, train_test_split
+from sklearn.preprocessing import OneHotEncoder
 
 
 def load_data(system, data_dir="../data"):
@@ -56,7 +59,12 @@ def load_data(system, data_dir="../data"):
     elif system == "poppler":
         # we filter all inputs that have no variation in the final size for all configurations
         # TODO This could be a general rule, not only for poppler
-        perf_matrix = perf_matrix[perf_matrix[["inputname", "size"]].groupby("inputname")["size"].transform("std") > 0]
+        perf_matrix = perf_matrix[
+            perf_matrix[["inputname", "size"]]
+            .groupby("inputname")["size"]
+            .transform("std")
+            > 0
+        ]
     elif system == "x264":
         # perf_matrix["rel_size"] = perf_matrix["size"] / perf_matrix["ORIG_SIZE"]  # We have `kbs` which is a better alternative
         # perf_matrix["rel_size"] = np.log(perf_matrix["rel_size"])  # To scale value distribution more evenly
@@ -65,23 +73,51 @@ def load_data(system, data_dir="../data"):
             "fps"
         ]  # fps is the only increasing performance measure
 
-    input_features = perf_matrix[["inputname"] + input_columns_cont]
-    if len(input_columns_cat) > 0:
-        input_features = input_features.join(
-            pd.get_dummies(perf_matrix[input_columns_cat])
-        )
+    # Separate input + config features
+    input_features = (
+        perf_matrix[["inputname"] + input_columns_cont + input_columns_cat]
+        .drop_duplicates()
+        .set_index("inputname")
+    )
 
-    input_features = input_features.drop_duplicates().set_index("inputname")
+    config_features = (
+        perf_matrix[["configurationID"] + config_columns_cont + config_columns_cat]
+        .drop_duplicates()
+        .set_index("configurationID")
+    )
 
-    config_features = perf_matrix[["configurationID"] + config_columns_cont]
-    if len(config_columns_cat) > 0:
-        config_features = config_features.join(
-            pd.get_dummies(perf_matrix[config_columns_cat])
-        )
+    # Prepare preprocessors, to be applied after data splitting
+    input_preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", StandardScaler(), input_columns_cont),
+            (
+                "cat",
+                OneHotEncoder(min_frequency=1, handle_unknown="infrequent_if_exist"),
+                input_columns_cat,
+            ),
+        ],
+        remainder="passthrough",
+    )
+    config_preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", StandardScaler(), config_columns_cont),
+            (
+                "cat",
+                OneHotEncoder(min_frequency=1, handle_unknown="infrequent_if_exist"),
+                config_columns_cat,
+            ),
+        ],
+        remainder="passthrough",
+    )
 
-    config_features = config_features.drop_duplicates().set_index("configurationID")
-
-    return perf_matrix, input_features, config_features, performances
+    return (
+        perf_matrix,
+        input_features,
+        config_features,
+        performances,
+        input_preprocessor,
+        config_preprocessor,
+    )
 
 
 def split_data(perf_matrix, test_size=0.2, verbose=True, random_state=None):
@@ -507,6 +543,9 @@ def evaluate_cc(
 
     n_recs is a parameter for the stability of the configuration.
     """
+    assert (
+        reference_mask is None or reference_mask.sum() >= n_neighbors
+    ), "Looking for more neighbors than references are"
     top_cfg = top_k_closest_euclidean_with_masks(
         config_representation,
         query_mask=query_mask,
@@ -538,7 +577,7 @@ def evaluate_cc(
         if r > rank_arr.shape[1]:
             # We can't ask for more neighbors than exist
             continue
-        
+
         # Cx(k*r) -> r highest ranked inputs * k neighbors
         reduced_top_r = top_r_ranks_per_neighbor[:, :r, :].reshape(n_queries, -1)
 
