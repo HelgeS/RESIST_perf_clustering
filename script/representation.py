@@ -1,4 +1,5 @@
 # %%
+import argparse
 import copy
 import itertools
 import os
@@ -41,13 +42,27 @@ from sklearn.decomposition import PCA
 
 # %%
 ## Load and prepare data
-data_dir = "../data"
-system = "x264"
+parser = argparse.ArgumentParser()
+parser.add_argument("system")
+parser.add_argument("-p", "--performance")
+parser.add_argument("-m", "--method", default="embed", choices=["embed", "pca", "tsne"])
+parser.add_argument("-d", "--dimensions", help="Embedding dimensions", default=32)
+parser.add_argument("--data-dir", default="../data")
+
+args = parser.parse_args(["poppler", "--data-dir", "data/"])
+
+data_dir = args.data_dir
+system = args.system
+method = args.method
+dimensions = args.dimensions
+
+assert method not in ("pca", "tsne") or 2 <= dimensions <= 3
 
 perf_matrix, input_features, config_features, all_performances = load_data(
     system=system, data_dir=data_dir
 )
-performances = ["rel_kbs"]
+performances = all_performances[0:1] if args.performance is None else [args.performance]
+assert all(p in all_performances for p in performances)
 
 print(f"Loaded data {system}")
 print(f"perf_matrix:{perf_matrix.shape}")
@@ -82,7 +97,7 @@ rank_map = input_config_map.groupby("inputname").transform(
 average_ranks = rank_map.mean(axis=1)
 
 # Correlation cache
-correlation_file = os.path.join(data_dir, "x264_correlations.p")
+correlation_file = os.path.join(data_dir, f"{system}_correlations.p")
 if os.path.exists(correlation_file):
     corr_dict = pickle.load(open(correlation_file, "rb"))
     input_correlations = corr_dict["input_correlations"]
@@ -328,12 +343,12 @@ def train_model(
     rank_map,
     error_regret,
     performance,
+    emb_size,
 ):
     num_input_features = train_input_arr.shape[1]
     num_config_features = train_config_arr.shape[1]
     input_map = {s: i for i, s in enumerate(train_inp)}
     config_map = {s: i for i, s in enumerate(train_cfg)}
-    emb_size = 32
     batch_size = 2048
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
