@@ -71,7 +71,7 @@ def load_data(system, data_dir="../data"):
             pd.get_dummies(perf_matrix[input_columns_cat])
         )
 
-    input_features = input_features.set_index("inputname").drop_duplicates()
+    input_features = input_features.drop_duplicates().set_index("inputname")
 
     config_features = perf_matrix[["configurationID"] + config_columns_cont]
     if len(config_columns_cat) > 0:
@@ -79,7 +79,7 @@ def load_data(system, data_dir="../data"):
             pd.get_dummies(perf_matrix[config_columns_cat])
         )
 
-    config_features = config_features.set_index("configurationID").drop_duplicates()
+    config_features = config_features.drop_duplicates().set_index("configurationID")
 
     return perf_matrix, input_features, config_features, performances
 
