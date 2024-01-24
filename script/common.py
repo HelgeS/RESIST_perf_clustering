@@ -47,7 +47,17 @@ def load_data(system, data_dir="../data"):
 
     # System-specific adjustments
     # TODO Could be made part of the preprocessed datasets
-    if system == "x264":
+    if system == "gcc":
+        # size=0 outputs in gcc seem to be invalid
+        perf_matrix = perf_matrix[perf_matrix["size"] > 0]
+    elif system == "lingeling":
+        # cps=0 outputs in lingeling seem to be invalid
+        perf_matrix = perf_matrix[perf_matrix["cps"] > 0]
+    elif system == "poppler":
+        # we filter all inputs that have no variation in the final size for all configurations
+        # TODO This could be a general rule, not only for poppler
+        perf_matrix = perf_matrix[perf_matrix[["inputname", "size"]].groupby("inputname")["size"].transform("std") > 0]
+    elif system == "x264":
         # perf_matrix["rel_size"] = perf_matrix["size"] / perf_matrix["ORIG_SIZE"]  # We have `kbs` which is a better alternative
         # perf_matrix["rel_size"] = np.log(perf_matrix["rel_size"])  # To scale value distribution more evenly
         perf_matrix["rel_kbs"] = perf_matrix["kbs"] / perf_matrix["ORIG_BITRATE"]
