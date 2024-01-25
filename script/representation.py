@@ -1,30 +1,27 @@
-# %%
 import argparse
 import copy
 import datetime
 import itertools
 import os
-import pickle
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
 from common import (
-    evaluate_cc,
     evaluate_ic,
     evaluate_ii,
     load_data,
-    prepare_result_df,
+    make_latex_tables,
     split_data_cv,
+    evaluate_prediction,
+    evaluate_retrieval,
 )
 from scipy import stats
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-from sklearn.metrics import mean_absolute_percentage_error
-from sklearn.neural_network import MLPRegressor
-from sklearn.preprocessing import StandardScaler
 from torch import nn
+
 
 # Purpose of this file
 # We learn a simple embedding of the input and configuration vectors
@@ -42,83 +39,6 @@ from torch import nn
 # At each batch we need n triplets
 # We can precalculate all triplets and pick from them or sample on the fly
 # Let's first iterate on the pre-generation
-
-# %%
-## Load and prepare data
-parser = argparse.ArgumentParser()
-parser.add_argument("system")
-parser.add_argument("-p", "--performance")
-parser.add_argument("-m", "--method", default="embed", choices=["embed", "pca", "tsne"])
-parser.add_argument("-d", "--dimensions", help="Embedding dimensions", default=32, type=int)
-parser.add_argument("--data-dir", default="../data")
-parser.add_argument("-o", "--output", default="../results/")
-
-# args = parser.parse_args(["poppler", "--data-dir", "data/"])
-args = parser.parse_args()
-
-data_dir = args.data_dir
-system = args.system
-method = args.method
-dimensions = args.dimensions
-
-run_timestamp = datetime.datetime.now().isoformat(timespec="minutes")
-result_dir = os.path.join(
-    args.output, f"{run_timestamp}_{system}_{method}_d{dimensions}"
-)
-os.makedirs(result_dir, exist_ok=True)
-
-assert method not in ("pca", "tsne") or 2 <= dimensions <= 3
-
-(
-    perf_matrix,
-    input_features,
-    config_features,
-    all_performances,
-    input_preprocessor,
-    config_preprocessor,
-) = load_data(system=system, data_dir=data_dir)
-performances = all_performances[0:1] if args.performance is None else [args.performance]
-assert all(p in all_performances for p in performances)
-
-print(f"Loaded data for `{system}`")
-print(f"perf_matrix:{perf_matrix.shape}")
-print(f"input_features(before preprocessing):{input_features.shape}")
-print(f"config_features(before preprocessing):{config_features.shape}")
-
-# This is a look up for performance measurements from inputname + configurationID
-input_config_map = (
-    perf_matrix[["inputname", "configurationID"] + performances]
-    .sort_values(["inputname", "configurationID"])
-    .set_index(["inputname", "configurationID"])
-)
-all_input_names = pd.Series(
-    input_config_map.index.get_level_values("inputname").unique()
-)
-all_config_ids = pd.Series(
-    input_config_map.index.get_level_values("configurationID").unique()
-)
-
-regret_map = input_config_map.groupby("inputname").transform(
-    lambda x: (x - x.min()) / (x.max() - x.min())
-)
-average_regret = regret_map.mean(axis=1)
-
-rank_map = input_config_map.groupby("inputname").transform(
-    lambda x: stats.rankdata(x, method="min")
-)
-average_ranks = rank_map.mean(axis=1)
-
-# Correlation cache
-correlation_file = os.path.join(data_dir, f"{system}_correlations.p")
-if os.path.exists(correlation_file):
-    corr_dict = pickle.load(open(correlation_file, "rb"))
-    input_correlations = corr_dict["input_correlations"]
-    config_correlations = corr_dict["config_correlations"]
-else:
-    input_correlations = None
-    config_correlations = None
-
-# %%
 
 # We define four functions to rank two items compared to an anchor item
 
@@ -177,9 +97,6 @@ def icc_cmp_fn(inp, cfg1, cfg2, rank_map):
         return ("icc", inp, cfg1, cfg2)
     else:
         return ("icc", inp, cfg2, cfg1)
-
-
-# %%
 
 
 # TODO Make vectorized version that splits evenly between the tasks
@@ -318,9 +235,6 @@ def make_batch_v3(inputs, configs, size, rank_map=None, lookup=None):
     return batch_idx
 
 
-# %%
-
-
 class ListNetLoss(nn.Module):
     def __init__(self):
         super(ListNetLoss, self).__init__()
@@ -338,7 +252,6 @@ class ListNetLoss(nn.Module):
         return -torch.sum(true_probs * torch.log(pred_probs + 1e-10), dim=1).mean()
 
 
-# %%
 def train_model(
     train_inp,
     train_cfg,
@@ -348,6 +261,7 @@ def train_model(
     error_regret,
     performance,
     emb_size,
+    epochs,
 ):
     num_input_features = train_input_arr.shape[1]
     num_config_features = train_config_arr.shape[1]
@@ -423,7 +337,7 @@ def train_model(
 
     total_loss = 0
 
-    for iteration in range(1000):
+    for iteration in range(epochs):
         batch, input_indices, config_indices = make_batch(
             train_inp,
             train_cfg,
@@ -523,68 +437,111 @@ def train_model(
     return best_models
 
 
-# %%
-# def evaluate_cross_validation():
-dfs = []
-random_seed = 59590  # 33154
+def evaluate_cv(
+    method,
+    dimensions,
+    epochs,
+    result_dir,
+    perf_matrix,
+    input_features,
+    config_features,
+    input_preprocessor,
+    config_preprocessor,
+    performances,
+    regret_map,
+    rank_map,
+    random_seed=59590,
+    topk_values=(1, 3, 5, 15, 25),
+    topr_values=(1, 3, 5, 15, 25),
+):
+    dfs = []
+    mape = []
 
-# Number of nearest neighbours to consider
-# Make multiples to allow better budget comparison
-topk_values = (1, 3, 5, 15, 25)
-topr_values = (1, 3, 5, 15, 25)
+    # Number of nearest neighbours to consider
+    # Make multiples to allow better budget comparison
 
-rank_arr = torch.from_numpy(
-    rank_map.reset_index()
-    .pivot_table(index="inputname", columns="configurationID", values=performances[0])
-    .values
-)
-regret_arr = torch.from_numpy(
-    regret_map.reset_index()
-    .pivot_table(index="inputname", columns="configurationID", values=performances[0])
-    .values
-)
-
-for data_split in split_data_cv(perf_matrix, random_state=random_seed):
-    train_inp = data_split["train_inp"]
-    train_cfg = data_split["train_cfg"]
-    test_inp = data_split["test_inp"]
-    test_cfg = data_split["test_cfg"]
-
-    # Prepare and select training/test data according to random split
-    train_input_mask = input_features.index.isin(train_inp)
-    test_input_mask = input_features.index.isin(test_inp)
-
-    train_config_mask = config_features.index.isin(train_cfg)
-    test_config_mask = config_features.index.isin(test_cfg)
-
-    input_preprocessor.fit(input_features[train_input_mask])
-    config_preprocessor.fit(config_features[train_config_mask])
-
-    input_arr = torch.from_numpy(input_preprocessor.transform(input_features)).float()
-    config_arr = torch.from_numpy(
-        config_preprocessor.transform(config_features)
-    ).float()
-
-    train_input_arr = input_arr[train_input_mask]
-    train_config_arr = config_arr[train_config_mask]
-
-    if method == "embed":
-        best_models = train_model(
-            train_inp=train_inp,
-            train_cfg=train_cfg,
-            train_input_arr=train_input_arr,
-            train_config_arr=train_config_arr,
-            rank_map=rank_map,
-            error_regret=regret_map,
-            emb_size=dimensions,
-            performance=performances[0],
+    rank_arr = torch.from_numpy(
+        rank_map.reset_index()
+        .pivot_table(
+            index="inputname", columns="configurationID", values=performances[0]
         )
-        input_emb, config_emb = best_models
-        input_emb = input_emb.cpu()
-        config_emb = config_emb.cpu()
+        .values
+    )
+    regret_arr = torch.from_numpy(
+        regret_map.reset_index()
+        .pivot_table(
+            index="inputname", columns="configurationID", values=performances[0]
+        )
+        .values
+    )
 
+    for data_split in split_data_cv(perf_matrix, random_state=random_seed):
+        train_inp = data_split["train_inp"]
+        train_cfg = data_split["train_cfg"]
+        test_inp = data_split["test_inp"]
+        test_cfg = data_split["test_cfg"]
+
+        # Prepare and select training/test data according to random split
+        train_input_mask = input_features.index.isin(train_inp)
+        test_input_mask = input_features.index.isin(test_inp)
+
+        train_config_mask = config_features.index.isin(train_cfg)
+        test_config_mask = config_features.index.isin(test_cfg)
+
+        input_preprocessor.fit(input_features[train_input_mask])
+        config_preprocessor.fit(config_features[train_config_mask])
+
+        input_arr = torch.from_numpy(
+            input_preprocessor.transform(input_features)
+        ).float()
+        config_arr = torch.from_numpy(
+            config_preprocessor.transform(config_features)
+        ).float()
+
+        train_input_arr = input_arr[train_input_mask]
+        train_config_arr = config_arr[train_config_mask]
+
+        if method == "embed":
+            best_models = train_model(
+                train_inp=train_inp,
+                train_cfg=train_cfg,
+                train_input_arr=train_input_arr,
+                train_config_arr=train_config_arr,
+                rank_map=rank_map,
+                error_regret=regret_map,
+                emb_size=dimensions,
+                epochs=epochs,
+                performance=performances[0],
+            )
+            input_emb, config_emb = best_models
+            input_emb = input_emb.cpu()
+            config_emb = config_emb.cpu()
+
+            with torch.no_grad():
+                input_embeddings = input_emb(input_arr)
+                config_embeddings = config_emb(config_arr)
+        elif method == "tsne":
+            input_emb = TSNE(dimensions).fit(train_input_arr)
+            config_emb = TSNE(dimensions).fit(train_config_arr)
+
+            input_embeddings = input_emb.transform(input_arr)
+            config_embeddings = config_emb.transform(config_arr)
+        elif method == "pca":
+            input_emb = PCA(dimensions).fit(train_input_arr)
+            config_emb = PCA(dimensions).fit(train_config_arr)
+
+            input_embeddings = input_emb.transform(input_arr)
+            config_embeddings = config_emb.transform(config_arr)
+        elif method == "original":
+            input_emb = None
+            config_emb = None
+
+            input_embeddings = input_arr
+            config_embeddings = config_arr
+
+        # Store model
         representation_file = os.path.join(
-            result_dir, f"embed_{data_split['split']}_s{random_seed}.p"
+            result_dir, f"{method}_split{data_split['split']}.p"
         )
         torch.save(
             {
@@ -595,337 +552,139 @@ for data_split in split_data_cv(perf_matrix, random_state=random_seed):
                 "test_inp": test_inp,
                 "test_cfg": test_cfg,
                 "split": data_split["split"],
+                "seed": random_seed,
+                # "system": system,
             },
             open(representation_file, "wb"),
         )
 
-        input_embeddings = input_emb(input_arr)
-        config_embeddings = config_emb(config_arr)
-    elif method == "tsne":
-        input_embeddings = TSNE(dimensions).fit_transform(input_arr)
-        config_embeddings = TSNE(dimensions).fit_transform(config_arr)
-    elif method == "pca":
-        input_embeddings = PCA(dimensions).fit_transform(input_arr)
-        config_embeddings = PCA(dimensions).fit_transform(config_arr)
+        ### Evaluation
 
-    # This is all evaluation
-    train_cc_rank = -1 * np.ones((len(topk_values), len(topr_values)))
-    train_cc_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
-    train_cc_regret = -1 * np.ones((len(topk_values), len(topr_values)))
+        ## Performance Prediction from embedded representation
+        train_input_repr = input_embeddings[train_input_mask]
+        test_input_repr = input_embeddings[test_input_mask]
 
-    test_cc_rank = -1 * np.ones((len(topk_values), len(topr_values)))
-    test_cc_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
-    test_cc_regret = -1 * np.ones((len(topk_values), len(topr_values)))
+        train_config_repr = config_embeddings[train_config_mask]
+        test_config_repr = config_embeddings[test_config_mask]
 
-    train_ii_rank = -1 * np.ones((len(topk_values), len(topr_values)))
-    train_ii_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
-    train_ii_regret = -1 * np.ones((len(topk_values), len(topr_values)))
+        train_mape, test_mape = evaluate_prediction(
+            performance_column=performances[0],
+            data_split=data_split,
+            train_input_repr=train_input_repr,
+            train_config_repr=train_config_repr,
+            test_input_repr=test_input_repr,
+            test_config_repr=test_config_repr,
+        )
+        print(f"MAPE:{train_mape:.3f} / {test_mape:.3f}")
+        mape.append((train_mape, test_mape))
 
-    test_ii_rank = -1 * np.ones((len(topk_values), len(topr_values)))
-    test_ii_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
-    test_ii_regret = -1 * np.ones((len(topk_values), len(topr_values)))
-
-    # Query: test data
-    # Database: train data
-
-    for i, topk in enumerate(topk_values):
-        if train_config_mask.sum() < topk or train_input_mask.sum() < topk:
-            # Not enough references to perform evaluation
-            continue
-
-        train_cc = evaluate_cc(
-            config_embeddings,
+        ## Detailed retrieval results
+        result_df = evaluate_retrieval(
+            topk_values=topk_values,
+            topr_values=topr_values,
             rank_arr=rank_arr,
             regret_arr=regret_arr,
-            n_neighbors=topk,
-            n_recs=topr_values,
-            query_mask=torch.from_numpy(train_config_mask),
-            reference_mask=torch.from_numpy(train_config_mask),
+            train_input_mask=train_input_mask,
+            test_input_mask=test_input_mask,
+            train_config_mask=train_config_mask,
+            test_config_mask=test_config_mask,
+            input_embeddings=input_embeddings,
+            config_embeddings=config_embeddings,
         )
-        train_cc_rank[i, :] = train_cc[0].numpy()
-        train_cc_regret[i, :] = train_cc[1].numpy()
-        train_cc_ratio[i, :] = train_cc[2].numpy()
+        dfs.extend(result_df)
 
-        test_cc = evaluate_cc(
-            config_embeddings,
-            rank_arr=rank_arr,
-            regret_arr=regret_arr,
-            n_neighbors=topk,
-            n_recs=topr_values,
-            query_mask=torch.from_numpy(test_config_mask),
-            reference_mask=torch.from_numpy(train_config_mask),
-        )
-        test_cc_rank[i, :] = test_cc[0].numpy()
-        test_cc_regret[i, :] = test_cc[1].numpy()
-        test_cc_ratio[i, :] = test_cc[2].numpy()
+    # Aggregate MAPE results
+    mape_df = pd.DataFrame(mape, columns=["train", "test"]).agg(["mean", "std"])
+    mape_df.to_csv(os.path.join(result_dir, "mape.csv"))
 
-        train_ii = evaluate_ii(
-            input_embeddings,
-            rank_arr=rank_arr,
-            regret_arr=regret_arr,
-            n_neighbors=topk,
-            n_recs=topr_values,
-            query_mask=torch.from_numpy(train_input_mask),
-            reference_mask=torch.from_numpy(train_input_mask),
-        )
-        train_ii_rank[i, :] = train_ii[0].numpy()
-        train_ii_regret[i, :] = train_ii[1].numpy()
-        train_ii_ratio[i, :] = train_ii[2].numpy()
+    # Aggregate retrieval results
+    full_df = pd.concat(dfs)
+    full_df.groupby(["mode", "split", "metric", "k"]).mean()
+    full_df.to_csv(os.path.join(result_dir, "full_df.csv"))
 
-        test_ii = evaluate_ii(
-            input_embeddings,
-            rank_arr=rank_arr,
-            regret_arr=regret_arr,
-            n_neighbors=topk,
-            n_recs=topr_values,
-            query_mask=torch.from_numpy(test_input_mask),
-            reference_mask=torch.from_numpy(train_input_mask),
-        )
-        test_ii_rank[i, :] = test_ii[0].numpy()
-        test_ii_regret[i, :] = test_ii[1].numpy()
-        test_ii_ratio[i, :] = test_ii[2].numpy()
+    make_latex_tables(full_df, result_dir=result_dir)
 
-    dfs.append(
-        prepare_result_df(
-            train_cc_rank,
-            topr_values,
-            topk_values,
-            {"metric": "rank", "mode": "cc", "split": "train"},
-        )
-    )
-    dfs.append(
-        prepare_result_df(
-            train_cc_regret,
-            topr_values,
-            topk_values,
-            {"metric": "regret", "mode": "cc", "split": "train"},
-        )
-    )
-    dfs.append(
-        prepare_result_df(
-            train_cc_ratio,
-            topr_values,
-            topk_values,
-            {"metric": "ratio", "mode": "cc", "split": "train"},
-        )
-    )
 
-    dfs.append(
-        prepare_result_df(
-            test_cc_rank,
-            topr_values,
-            topk_values,
-            {"metric": "rank", "mode": "cc", "split": "test"},
-        )
+def main(data_dir, system, performance, method, dimensions, epochs, output_dir):
+    run_timestamp = datetime.datetime.now().isoformat(timespec="minutes")
+    result_dir = os.path.join(
+        output_dir, f"{run_timestamp}_{system}_{method}_d{dimensions}"
     )
-    dfs.append(
-        prepare_result_df(
-            test_cc_regret,
-            topr_values,
-            topk_values,
-            {"metric": "regret", "mode": "cc", "split": "test"},
-        )
-    )
-    dfs.append(
-        prepare_result_df(
-            test_cc_ratio,
-            topr_values,
-            topk_values,
-            {"metric": "ratio", "mode": "cc", "split": "test"},
-        )
-    )
+    os.makedirs(result_dir, exist_ok=True)
 
-    dfs.append(
-        prepare_result_df(
-            train_ii_rank,
-            topr_values,
-            topk_values,
-            {"metric": "rank", "mode": "ii", "split": "train"},
-        )
-    )
-    dfs.append(
-        prepare_result_df(
-            train_ii_regret,
-            topr_values,
-            topk_values,
-            {"metric": "regret", "mode": "ii", "split": "train"},
-        )
-    )
-    dfs.append(
-        prepare_result_df(
-            train_ii_ratio,
-            topr_values,
-            topk_values,
-            {"metric": "ratio", "mode": "ii", "split": "train"},
-        )
-    )
+    assert method not in ("pca", "tsne") or 2 <= dimensions <= 3
 
-    dfs.append(
-        prepare_result_df(
-            test_ii_rank,
-            topr_values,
-            topk_values,
-            {"metric": "rank", "mode": "ii", "split": "test"},
-        )
-    )
-    dfs.append(
-        prepare_result_df(
-            test_ii_regret,
-            topr_values,
-            topk_values,
-            {"metric": "regret", "mode": "ii", "split": "test"},
-        )
-    )
-    dfs.append(
-        prepare_result_df(
-            test_ii_ratio,
-            topr_values,
-            topk_values,
-            {"metric": "ratio", "mode": "ii", "split": "test"},
-        )
-    )
-
-full_df = pd.concat(dfs)
-full_df.groupby(["mode", "split", "metric", "k"]).mean()
-full_df.to_csv(os.path.join(result_dir, "full_df.csv"))
-
-# %%
-
-dfmean = (
-    full_df.reset_index()
-    .groupby(["mode", "split", "metric", "k"], as_index=False)
-    .mean()
-)
-
-# %%
-
-m = pd.concat(
     (
-        dfmean[
-            (dfmean["mode"] == "ii")
-            & (dfmean["split"] == "test")
-            & (dfmean["metric"] == "rank")
-        ]
-        .drop(columns=["mode", "split", "metric"])
-        .set_index("k"),
-        dfmean[
-            (dfmean["mode"] == "ii")
-            & (dfmean["split"] == "test")
-            & (dfmean["metric"] == "ratio")
-        ]
-        .drop(columns=["mode", "split", "metric"])
-        .set_index("k"),
-        dfmean[
-            (dfmean["mode"] == "ii")
-            & (dfmean["split"] == "test")
-            & (dfmean["metric"] == "regret")
-        ]
-        .drop(columns=["mode", "split", "metric"])
-        .set_index("k"),
-    ),
-    axis=1,
-    keys=["rank", "ratio", "regret"],
-)
-print(m.to_latex(index=True, float_format="%.2f", na_rep="-", caption="Input-Input"))
-m.to_latex(
-    buf=os.path.join(result_dir, "input_input.tex"),
-    index=True,
-    float_format="%.2f",
-    na_rep="-",
-    caption="Input-Input",
-)
+        perf_matrix,
+        input_features,
+        config_features,
+        all_performances,
+        input_preprocessor,
+        config_preprocessor,
+    ) = load_data(system=system, data_dir=data_dir)
+    performances = all_performances[0:1] if performance is None else [performance]
+    assert all(p in all_performances for p in performances)
 
-# %%
+    print(f"Loaded data for `{system}`")
+    print(f"perf_matrix:{perf_matrix.shape}")
+    print(f"input_features(before preprocessing):{input_features.shape}")
+    print(f"config_features(before preprocessing):{config_features.shape}")
 
-m = pd.concat(
-    (
-        dfmean[
-            (dfmean["mode"] == "cc")
-            & (dfmean["split"] == "test")
-            & (dfmean["metric"] == "rank")
-        ]
-        .drop(columns=["mode", "split", "metric"])
-        .set_index("k"),
-        dfmean[
-            (dfmean["mode"] == "cc")
-            & (dfmean["split"] == "test")
-            & (dfmean["metric"] == "ratio")
-        ]
-        .drop(columns=["mode", "split", "metric"])
-        .set_index("k"),
-        dfmean[
-            (dfmean["mode"] == "cc")
-            & (dfmean["split"] == "test")
-            & (dfmean["metric"] == "regret")
-        ]
-        .drop(columns=["mode", "split", "metric"])
-        .set_index("k"),
-    ),
-    axis=1,
-    keys=["rank", "ratio", "regret"],
-)
-print(
-    m.to_latex(
-        index=True,
-        float_format="%.2f",
-        na_rep="-",
-        caption="Configuration-Configuration",
+    # This is a look up for performance measurements from inputname + configurationID
+    input_config_map = (
+        perf_matrix[["inputname", "configurationID"] + performances]
+        .sort_values(["inputname", "configurationID"])
+        .set_index(["inputname", "configurationID"])
     )
-)
-m.to_latex(
-    buf=os.path.join(result_dir, "config_config.tex"),
-    index=True,
-    float_format="%.2f",
-    na_rep="-",
-    caption="Configuration-Configuration",
-)
 
-# %%
-
-td = data_split["train_data"]
-indices = np.vstack(
-    (
-        td.configurationID.apply(lambda s: np.where(train_cfg == s)[0].item()).values,
-        td.inputname.apply(lambda s: np.where(train_inp == s)[0].item()).values,
+    regret_map = input_config_map.groupby("inputname").transform(
+        lambda x: (x - x.min()) / (x.max() - x.min())
     )
-).T
 
-scaler = StandardScaler()
-y = scaler.fit_transform(td[performances[0]].values.reshape(-1, 1))
+    rank_map = input_config_map.groupby("inputname").transform(
+        lambda x: stats.rankdata(x, method="min")
+    )
 
-with torch.no_grad():
-    X = torch.concat(
-        (
-            input_emb(train_input_arr)[indices[:, 1]],
-            config_emb(train_config_arr)[indices[:, 0]],
-        ),
-        dim=1,
-    ).numpy()
-
-print("Embedded features")
-
-m = MLPRegressor(hidden_layer_sizes=(64,), verbose=True)
-m.fit(X, y.ravel())
-print("Train score", m.score(X, y))
-yp = m.predict(X)
-print("Train MAPE", mean_absolute_percentage_error(y, yp))
-
-# %%
-
-X = torch.concat(
-    (
-        train_input_arr[indices[:, 1]],
-        train_config_arr[indices[:, 0]],
-    ),
-    dim=1,
-).numpy()
+    evaluate_cv(
+        method,
+        dimensions,
+        epochs,
+        result_dir,
+        perf_matrix,
+        input_features,
+        config_features,
+        input_preprocessor,
+        config_preprocessor,
+        performances,
+        regret_map,
+        rank_map,
+    )
 
 
-print("Original features")
+if __name__ == "__main__":
+    ## Load and prepare data
+    parser = argparse.ArgumentParser()
+    parser.add_argument("system")
+    parser.add_argument("-p", "--performance")
+    parser.add_argument(
+        "-m", "--method", default="embed", choices=["embed", "pca", "tsne", "original"]
+    )
+    parser.add_argument(
+        "-d", "--dimensions", help="Embedding dimensions", default=32, type=int
+    )
+    parser.add_argument("--epochs", default=1000, type=int)
+    parser.add_argument("--data-dir", default="../data")
+    parser.add_argument("-o", "--output", default="../results/")
 
-m = MLPRegressor(hidden_layer_sizes=(64,), verbose=True)
-m.fit(X, y.ravel())
-print("Train score", m.score(X, y))
-yp = m.predict(X)
-print("Train MAPE", mean_absolute_percentage_error(y, yp))
-# %%
+    args = parser.parse_args(["poppler", "--data-dir", "data/", "--epochs=20"])
+    # args = parser.parse_args()
+
+    main(
+        data_dir=args.data_dir,
+        system=args.system,
+        performance=args.performance,
+        method=args.method,
+        dimensions=args.dimensions,
+        epochs=args.epochs,
+        output_dir=args.output,
+    )

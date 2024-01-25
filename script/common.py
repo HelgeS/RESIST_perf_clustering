@@ -3,14 +3,15 @@ import os
 
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.discriminant_analysis import StandardScaler
 import torch
 import torch.nn.functional as F
 from main import load_all_csv
 from scipy import stats
+from sklearn.compose import ColumnTransformer
+from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.model_selection import KFold, train_test_split
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 def load_data(system, data_dir="../data"):
@@ -133,6 +134,35 @@ def split_data(perf_matrix, test_size=0.2, verbose=True, random_state=None):
         test_size=test_size,
         random_state=random_state,
     )
+    return make_split(
+        perf_matrix, train_cfg, test_cfg, train_inp, test_inp, verbose=verbose
+    )
+
+
+def split_data_cv(perf_matrix, splits=4, verbose=True, random_state=None):
+    kf_inp = KFold(n_splits=splits, random_state=random_state, shuffle=True)
+    kf_cfg = KFold(n_splits=splits, random_state=random_state, shuffle=True)
+
+    configuration_ids = perf_matrix["configurationID"].unique()
+    inputnames = perf_matrix["inputname"].unique()
+
+    for split_idx, (
+        (train_cfg_idx, test_cfg_idx),
+        (train_inp_idx, test_inp_idx),
+    ) in enumerate(zip(kf_inp.split(configuration_ids), kf_cfg.split(inputnames))):
+        train_cfg = configuration_ids[train_cfg_idx]
+        test_cfg = configuration_ids[test_cfg_idx]
+        train_inp = inputnames[train_inp_idx]
+        test_inp = inputnames[test_inp_idx]
+
+        split_dict = make_split(
+            perf_matrix, train_cfg, test_cfg, train_inp, test_inp, verbose=verbose
+        )
+        split_dict["split"] = split_idx
+        yield split_dict
+
+
+def make_split(perf_matrix, train_cfg, test_cfg, train_inp, test_inp, verbose=True):
     train_cfg.sort()
     test_cfg.sort()
     train_inp.sort()
@@ -140,6 +170,11 @@ def split_data(perf_matrix, test_size=0.2, verbose=True, random_state=None):
     train_data = perf_matrix[
         perf_matrix["configurationID"].isin(train_cfg)
         & perf_matrix["inputname"].isin(train_inp)
+    ]
+
+    test_data = perf_matrix[
+        perf_matrix["configurationID"].isin(test_cfg)
+        | perf_matrix["inputname"].isin(test_inp)
     ]
     test_cfg_new = perf_matrix[
         perf_matrix["configurationID"].isin(test_cfg)
@@ -173,72 +208,11 @@ def split_data(perf_matrix, test_size=0.2, verbose=True, random_state=None):
         "train_inp": train_inp,
         "test_inp": test_inp,
         "train_data": train_data,
-        "test_data_cfg_new": test_cfg_new,
-        "test_data_inp_new": test_inp_new,
-        "test_data_both_new": test_both_new,
+        "test_data": test_data,
+        # "test_data_cfg_new": test_cfg_new,
+        # "test_data_inp_new": test_inp_new,
+        # "test_data_both_new": test_both_new,
     }
-
-
-def split_data_cv(perf_matrix, splits=4, verbose=True, random_state=None):
-    kf_inp = KFold(n_splits=splits, random_state=random_state, shuffle=True)
-    kf_cfg = KFold(n_splits=splits, random_state=random_state, shuffle=True)
-
-    configuration_ids = perf_matrix["configurationID"].unique()
-    inputnames = perf_matrix["inputname"].unique()
-
-    for split_idx, (
-        (train_cfg_idx, test_cfg_idx),
-        (train_inp_idx, test_inp_idx),
-    ) in enumerate(zip(kf_inp.split(configuration_ids), kf_cfg.split(inputnames))):
-        train_cfg = configuration_ids[train_cfg_idx]
-        test_cfg = configuration_ids[test_cfg_idx]
-        train_inp = inputnames[train_inp_idx]
-        test_inp = inputnames[test_inp_idx]
-        train_cfg.sort()
-        test_cfg.sort()
-        train_inp.sort()
-        test_inp.sort()
-        train_data = perf_matrix[
-            perf_matrix["configurationID"].isin(train_cfg)
-            & perf_matrix["inputname"].isin(train_inp)
-        ]
-        test_cfg_new = perf_matrix[
-            perf_matrix["configurationID"].isin(test_cfg)
-            & perf_matrix["inputname"].isin(train_inp)
-        ]
-        test_inp_new = perf_matrix[
-            perf_matrix["configurationID"].isin(train_cfg)
-            & perf_matrix["inputname"].isin(test_inp)
-        ]
-        test_both_new = perf_matrix[
-            perf_matrix["configurationID"].isin(test_cfg)
-            & perf_matrix["inputname"].isin(test_inp)
-        ]
-        assert (
-            test_cfg_new.shape[0]
-            + test_inp_new.shape[0]
-            + test_both_new.shape[0]
-            + train_data.shape[0]
-            == perf_matrix.shape[0]
-        )
-
-        if verbose:
-            print(f"Training data: {100*train_data.shape[0]/perf_matrix.shape[0]:.2f}%")
-            print(f"Both new: {100*test_both_new.shape[0]/perf_matrix.shape[0]:.2f}%")
-            print(f"Config new: {100*test_cfg_new.shape[0]/perf_matrix.shape[0]:.2f}%")
-            print(f"Input new: {100*test_inp_new.shape[0]/perf_matrix.shape[0]:.2f}%")
-
-        yield {
-            "split": split_idx,
-            "train_cfg": train_cfg,
-            "test_cfg": test_cfg,
-            "train_inp": train_inp,
-            "test_inp": test_inp,
-            "train_data": train_data,
-            "test_data_cfg_new": test_cfg_new,
-            "test_data_inp_new": test_inp_new,
-            "test_data_both_new": test_both_new,
-        }
 
 
 ## Rank-based distance calculation via correlation
@@ -624,3 +598,340 @@ def prepare_result_df(results, topr_values, topk_values, extra_info={}):
         df[k] = v
 
     return df
+
+
+def evaluate_prediction(
+    performance_column,
+    data_split,
+    train_input_repr,
+    train_config_repr,
+    test_input_repr,
+    test_config_repr,
+):
+    train_data = data_split["train_data"]
+    test_data = data_split["test_data"]
+
+    train_inp = data_split["train_inp"]
+    train_cfg = data_split["train_cfg"]
+
+    test_inp = data_split["test_inp"]
+    test_cfg = data_split["test_cfg"]
+
+    train_indices = np.vstack(
+        (
+            train_data.configurationID.apply(
+                lambda s: np.where(train_cfg == s)[0].item()
+            ).values,
+            train_data.inputname.apply(
+                lambda s: np.where(train_inp == s)[0].item()
+            ).values,
+        )
+    ).T
+
+    # The test data can contain values from the training set (for old/new combinations)
+    # Therefore we must look in both sets of data for your data embeddings
+    all_cfg = np.hstack((train_cfg, test_cfg))
+    all_inp = np.hstack((train_inp, test_inp))
+    test_indices = np.vstack(
+        (
+            test_data.configurationID.apply(
+                lambda s: np.where(all_cfg == s)[0].item()
+            ).values,
+            test_data.inputname.apply(
+                lambda s: np.where(all_inp == s)[0].item()
+            ).values,
+        )
+    ).T
+
+    scaler = StandardScaler()
+    y_train = scaler.fit_transform(train_data[performance_column].values.reshape(-1, 1))
+    y_test = scaler.transform(test_data[performance_column].values.reshape(-1, 1))
+
+    X_train = torch.concat(
+        (
+            train_input_repr[train_indices[:, 1]],
+            train_config_repr[train_indices[:, 0]],
+        ),
+        dim=1,
+    ).numpy()
+
+    input_repr = torch.concat((train_input_repr, test_input_repr))
+    config_repr = torch.concat((train_config_repr, test_config_repr))
+    X_test = torch.concat(
+        (
+            input_repr[test_indices[:, 1]],
+            config_repr[test_indices[:, 0]],
+        ),
+        dim=1,
+    ).numpy()
+
+    m = MLPRegressor(hidden_layer_sizes=(64,))
+    m.fit(X_train, y_train.ravel())
+    # print("Train score", m.score(X_train, y_train))
+    train_mape = mean_absolute_percentage_error(y_train, m.predict(X_train))
+    test_mape = mean_absolute_percentage_error(y_test, m.predict(X_test))
+
+    return train_mape, test_mape
+
+
+def make_latex_tables(full_df, result_dir, verbose=True):
+    dfmean = (
+        full_df.reset_index()
+        .groupby(["mode", "split", "metric", "k"], as_index=False)
+        .mean()
+    )
+
+    m_ii = pd.concat(
+        (
+            dfmean[
+                (dfmean["mode"] == "ii")
+                & (dfmean["split"] == "test")
+                & (dfmean["metric"] == "rank")
+            ]
+            .drop(columns=["mode", "split", "metric"])
+            .set_index("k"),
+            dfmean[
+                (dfmean["mode"] == "ii")
+                & (dfmean["split"] == "test")
+                & (dfmean["metric"] == "ratio")
+            ]
+            .drop(columns=["mode", "split", "metric"])
+            .set_index("k"),
+            dfmean[
+                (dfmean["mode"] == "ii")
+                & (dfmean["split"] == "test")
+                & (dfmean["metric"] == "regret")
+            ]
+            .drop(columns=["mode", "split", "metric"])
+            .set_index("k"),
+        ),
+        axis=1,
+        keys=["rank", "ratio", "regret"],
+    )
+
+    m_ii.to_latex(
+        buf=os.path.join(result_dir, "input_input.tex"),
+        index=True,
+        float_format="%.2f",
+        na_rep="-",
+        caption="Input-Input",
+    )
+
+    if verbose:
+        print(
+            m_ii.to_latex(
+                index=True, float_format="%.2f", na_rep="-", caption="Input-Input"
+            )
+        )
+
+    m_cc = pd.concat(
+        (
+            dfmean[
+                (dfmean["mode"] == "cc")
+                & (dfmean["split"] == "test")
+                & (dfmean["metric"] == "rank")
+            ]
+            .drop(columns=["mode", "split", "metric"])
+            .set_index("k"),
+            dfmean[
+                (dfmean["mode"] == "cc")
+                & (dfmean["split"] == "test")
+                & (dfmean["metric"] == "ratio")
+            ]
+            .drop(columns=["mode", "split", "metric"])
+            .set_index("k"),
+            dfmean[
+                (dfmean["mode"] == "cc")
+                & (dfmean["split"] == "test")
+                & (dfmean["metric"] == "regret")
+            ]
+            .drop(columns=["mode", "split", "metric"])
+            .set_index("k"),
+        ),
+        axis=1,
+        keys=["rank", "ratio", "regret"],
+    )
+
+    m_cc.to_latex(
+        buf=os.path.join(result_dir, "config_config.tex"),
+        index=True,
+        float_format="%.2f",
+        na_rep="-",
+        caption="Configuration-Configuration",
+    )
+
+    if verbose:
+        print(
+            m_cc.to_latex(
+                index=True,
+                float_format="%.2f",
+                na_rep="-",
+                caption="Configuration-Configuration",
+            )
+        )
+
+
+def evaluate_retrieval(
+    topk_values,
+    topr_values,
+    rank_arr,
+    regret_arr,
+    train_input_mask,
+    test_input_mask,
+    train_config_mask,
+    test_config_mask,
+    input_embeddings,
+    config_embeddings,
+):
+    train_cc_rank = -1 * np.ones((len(topk_values), len(topr_values)))
+    train_cc_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
+    train_cc_regret = -1 * np.ones((len(topk_values), len(topr_values)))
+
+    test_cc_rank = -1 * np.ones((len(topk_values), len(topr_values)))
+    test_cc_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
+    test_cc_regret = -1 * np.ones((len(topk_values), len(topr_values)))
+
+    train_ii_rank = -1 * np.ones((len(topk_values), len(topr_values)))
+    train_ii_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
+    train_ii_regret = -1 * np.ones((len(topk_values), len(topr_values)))
+
+    test_ii_rank = -1 * np.ones((len(topk_values), len(topr_values)))
+    test_ii_ratio = -1 * np.ones((len(topk_values), len(topr_values)))
+    test_ii_regret = -1 * np.ones((len(topk_values), len(topr_values)))
+
+    # Query: test data
+    # Database: train data
+
+    for i, topk in enumerate(topk_values):
+        if train_config_mask.sum() < topk or train_input_mask.sum() < topk:
+            # Not enough references to perform evaluation
+            continue
+
+        train_cc = evaluate_cc(
+            config_embeddings,
+            rank_arr=rank_arr,
+            regret_arr=regret_arr,
+            n_neighbors=topk,
+            n_recs=topr_values,
+            query_mask=torch.from_numpy(train_config_mask),
+            reference_mask=torch.from_numpy(train_config_mask),
+        )
+        train_cc_rank[i, :] = train_cc[0].numpy()
+        train_cc_regret[i, :] = train_cc[1].numpy()
+        train_cc_ratio[i, :] = train_cc[2].numpy()
+
+        test_cc = evaluate_cc(
+            config_embeddings,
+            rank_arr=rank_arr,
+            regret_arr=regret_arr,
+            n_neighbors=topk,
+            n_recs=topr_values,
+            query_mask=torch.from_numpy(test_config_mask),
+            reference_mask=torch.from_numpy(train_config_mask),
+        )
+        test_cc_rank[i, :] = test_cc[0].numpy()
+        test_cc_regret[i, :] = test_cc[1].numpy()
+        test_cc_ratio[i, :] = test_cc[2].numpy()
+
+        train_ii = evaluate_ii(
+            input_embeddings,
+            rank_arr=rank_arr,
+            regret_arr=regret_arr,
+            n_neighbors=topk,
+            n_recs=topr_values,
+            query_mask=torch.from_numpy(train_input_mask),
+            reference_mask=torch.from_numpy(train_input_mask),
+        )
+        train_ii_rank[i, :] = train_ii[0].numpy()
+        train_ii_regret[i, :] = train_ii[1].numpy()
+        train_ii_ratio[i, :] = train_ii[2].numpy()
+
+        test_ii = evaluate_ii(
+            input_embeddings,
+            rank_arr=rank_arr,
+            regret_arr=regret_arr,
+            n_neighbors=topk,
+            n_recs=topr_values,
+            query_mask=torch.from_numpy(test_input_mask),
+            reference_mask=torch.from_numpy(train_input_mask),
+        )
+        test_ii_rank[i, :] = test_ii[0].numpy()
+        test_ii_regret[i, :] = test_ii[1].numpy()
+        test_ii_ratio[i, :] = test_ii[2].numpy()
+
+    result_dataframes = [
+        prepare_result_df(
+            train_cc_rank,
+            topr_values,
+            topk_values,
+            {"metric": "rank", "mode": "cc", "split": "train"},
+        ),
+        prepare_result_df(
+            train_cc_regret,
+            topr_values,
+            topk_values,
+            {"metric": "regret", "mode": "cc", "split": "train"},
+        ),
+        prepare_result_df(
+            train_cc_ratio,
+            topr_values,
+            topk_values,
+            {"metric": "ratio", "mode": "cc", "split": "train"},
+        ),
+        prepare_result_df(
+            test_cc_rank,
+            topr_values,
+            topk_values,
+            {"metric": "rank", "mode": "cc", "split": "test"},
+        ),
+        prepare_result_df(
+            test_cc_regret,
+            topr_values,
+            topk_values,
+            {"metric": "regret", "mode": "cc", "split": "test"},
+        ),
+        prepare_result_df(
+            test_cc_ratio,
+            topr_values,
+            topk_values,
+            {"metric": "ratio", "mode": "cc", "split": "test"},
+        ),
+        prepare_result_df(
+            train_ii_rank,
+            topr_values,
+            topk_values,
+            {"metric": "rank", "mode": "ii", "split": "train"},
+        ),
+        prepare_result_df(
+            train_ii_regret,
+            topr_values,
+            topk_values,
+            {"metric": "regret", "mode": "ii", "split": "train"},
+        ),
+        prepare_result_df(
+            train_ii_ratio,
+            topr_values,
+            topk_values,
+            {"metric": "ratio", "mode": "ii", "split": "train"},
+        ),
+        prepare_result_df(
+            test_ii_rank,
+            topr_values,
+            topk_values,
+            {"metric": "rank", "mode": "ii", "split": "test"},
+        ),
+        prepare_result_df(
+            test_ii_regret,
+            topr_values,
+            topk_values,
+            {"metric": "regret", "mode": "ii", "split": "test"},
+        ),
+        prepare_result_df(
+            test_ii_ratio,
+            topr_values,
+            topk_values,
+            {"metric": "ratio", "mode": "ii", "split": "test"},
+        ),
+    ]
+
+    return result_dataframes
