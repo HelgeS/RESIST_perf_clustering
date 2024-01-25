@@ -522,11 +522,15 @@ def evaluate_cv(
             input_emb = input_emb.cpu()
             config_emb = config_emb.cpu()
         elif method == "tsne":
-            input_emb = TSNE(dimensions).fit(train_input_arr)
-            config_emb = TSNE(dimensions).fit(train_config_arr)
+            # T-SNE from scikit-learn has no fit/transform split
+            # Therefore we fit on the whole dataset, which is not direcly comparable
+            # Also, we should consider different initializations to find the best embedding with TSNE
+            # See: https://scikit-learn.org/stable/modules/manifold.html#t-sne
+            input_emb = TSNE(dimensions) #.fit(train_input_arr)
+            config_emb = TSNE(dimensions) #.fit(train_config_arr)
 
-            input_embeddings = input_emb.transform(input_arr)
-            config_embeddings = config_emb.transform(config_arr)
+            input_embeddings = input_emb.fit_transform(input_arr)
+            config_embeddings = config_emb.fit_transform(config_arr)
         elif method == "pca":
             input_emb = PCA(dimensions).fit(train_input_arr)
             config_emb = PCA(dimensions).fit(train_config_arr)
