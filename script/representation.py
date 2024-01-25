@@ -514,12 +514,13 @@ def evaluate_cv(
                 performance=performances[0],
             )
             input_emb, config_emb = best_models
-            input_emb = input_emb.cpu()
-            config_emb = config_emb.cpu()
 
             with torch.no_grad():
-                input_embeddings = input_emb(input_arr)
-                config_embeddings = config_emb(config_arr)
+                input_embeddings = input_emb(input_arr).numpy()
+                config_embeddings = config_emb(config_arr).numpy()
+
+            input_emb = input_emb.cpu()
+            config_emb = config_emb.cpu()
         elif method == "tsne":
             input_emb = TSNE(dimensions).fit(train_input_arr)
             config_emb = TSNE(dimensions).fit(train_config_arr)
@@ -606,7 +607,7 @@ def evaluate_cv(
 
 
 def main(data_dir, system, performance, method, dimensions, epochs, output_dir):
-    run_timestamp = datetime.datetime.now().isoformat(timespec="minutes")
+    run_timestamp = datetime.datetime.now().isoformat(timespec="minutes", sep="-").replace(":", "-")
     result_dir = os.path.join(
         output_dir, f"{run_timestamp}_{system}_{method}_d{dimensions}"
     )
@@ -676,8 +677,8 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", default="../data")
     parser.add_argument("-o", "--output", default="../results/")
 
-    args = parser.parse_args(["poppler", "--data-dir", "data/", "--epochs=20"])
-    # args = parser.parse_args()
+    # args = parser.parse_args(["poppler", "-m=pca", "-d=3", "--data-dir", "data/", "--epochs=20"])
+    args = parser.parse_args()
 
     main(
         data_dir=args.data_dir,

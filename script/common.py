@@ -388,7 +388,7 @@ def top_k_closest_euclidean_with_masks(emb, query_mask, reference_mask, k):
         reference_mask
     ]  # e.g. the training data for which we have measurements
 
-    distance = torch.cdist(queries, references, p=2)
+    distance = torch.cdist(ensure_tensor(queries), ensure_tensor(references), p=2)
     shared_items = query_mask & reference_mask
 
     if shared_items.any():
@@ -410,6 +410,13 @@ def top_k_closest_euclidean_with_masks(emb, query_mask, reference_mask, k):
     ), top_refs.shape
 
     return top_refs
+
+
+def ensure_tensor(x):
+    if isinstance(x, torch.Tensor):
+        return x
+    
+    return torch.from_numpy(x)
 
 
 def evaluate_ii(
@@ -498,7 +505,7 @@ def evaluate_ii(
 
     return best_rank, best_regret, share_ratios
 
-
+# TODO There is no reason this uses torch, it should be numpy
 def evaluate_cc(
     config_representation,
     rank_arr,
@@ -647,23 +654,21 @@ def evaluate_prediction(
     y_train = scaler.fit_transform(train_data[performance_column].values.reshape(-1, 1))
     y_test = scaler.transform(test_data[performance_column].values.reshape(-1, 1))
 
-    X_train = torch.concat(
+    X_train = np.hstack(
         (
             train_input_repr[train_indices[:, 1]],
             train_config_repr[train_indices[:, 0]],
-        ),
-        dim=1,
-    ).numpy()
+        )
+    )
 
-    input_repr = torch.concat((train_input_repr, test_input_repr))
-    config_repr = torch.concat((train_config_repr, test_config_repr))
-    X_test = torch.concat(
+    input_repr = np.vstack((train_input_repr, test_input_repr))
+    config_repr = np.vstack((train_config_repr, test_config_repr))
+    X_test = np.hstack(
         (
             input_repr[test_indices[:, 1]],
             config_repr[test_indices[:, 0]],
-        ),
-        dim=1,
-    ).numpy()
+        )
+    )
 
     m = MLPRegressor(hidden_layer_sizes=(64,))
     m.fit(X_train, y_train.ravel())
