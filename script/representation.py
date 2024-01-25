@@ -201,8 +201,8 @@ def make_batch_v2(
 def make_batch_v3(inputs, configs, size, rank_map=None, lookup=None):
     mask = torch.tensor([[1, 1, 1], [0, 0, 0], [1, 0, 0], [0, 1, 1]], dtype=bool)
     batch_mask = mask[np.random.choice(mask.shape[0], size=10, replace=True)]
-    n_inputs = batch_mask.sum()
-    n_configs = (~batch_mask).sum()
+    # n_inputs = batch_mask.sum()
+    # n_configs = (~batch_mask).sum()
 
     # selected_inputs = np.random.choice(len(inputs), size=(n_inputs,), replace=False)
     # seleced_configs = np.random.choice(len(configs), size=(n_configs,), replace=False)

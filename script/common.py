@@ -282,7 +282,7 @@ def stat_distance(measurements, stats_fn):
             for j in range(i + 1, A):
                 try:
                     res = stats_fn(ranks[i, :, c], ranks[j, :, c])
-                    stat, p_value = res.statistic, res.pvalue
+                    stat, _ = res.statistic, res.pvalue
 
                     distance_matrix[i, j, c] = stat
                     distance_matrix[j, i, c] = stat
