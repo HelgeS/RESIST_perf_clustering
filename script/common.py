@@ -14,10 +14,15 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
-def load_data(system, data_dir="../data"):
+def load_data(system, input_properties="tabular", data_dir="../data"):
     if system == "nodejs":
         raise NotImplementedError(
             "We don't support nodejs / it's missing the configurationID in the measurements"
+        )
+
+    if input_properties == "embedding" and system not in ("gcc",):
+        raise NotImplementedError(
+            f"Input properties `embedding` only available for (gcc,), not `{system}`"
         )
 
     metadata = json.load(open(os.path.join(data_dir, "metadata.json")))
@@ -33,8 +38,16 @@ def load_data(system, data_dir="../data"):
     meas_matrix, _ = load_all_csv(
         os.path.join(data_dir, system), ext="csv", with_names=True
     )
+
+    if input_properties == "embedding":
+        input_properties_file = "input_embeddings.csv"
+        input_columns_cat = []
+        input_columns_cont = [f"v{i}" for i in range(768)]
+    else:
+        input_properties_file = "properties.csv"
+
     input_properties = pd.read_csv(
-        os.path.join(data_dir, system, "others", "properties.csv"),
+        os.path.join(data_dir, system, "others", input_properties_file),
         dtype={"name": "object"},
     ).set_index("id")  # id needed?
 
@@ -88,6 +101,10 @@ def load_data(system, data_dir="../data"):
     )
 
     # Prepare preprocessors, to be applied after data splitting
+    if input_properties == "embedding":
+        # Input embeddings are already scaled
+        input_columns_cont = []
+
     input_preprocessor = ColumnTransformer(
         transformers=[
             ("num", StandardScaler(), input_columns_cont),

@@ -526,8 +526,8 @@ def evaluate_cv(
             # Therefore we fit on the whole dataset, which is not direcly comparable
             # Also, we should consider different initializations to find the best embedding with TSNE
             # See: https://scikit-learn.org/stable/modules/manifold.html#t-sne
-            input_emb = TSNE(dimensions) #.fit(train_input_arr)
-            config_emb = TSNE(dimensions) #.fit(train_config_arr)
+            input_emb = TSNE(dimensions)
+            config_emb = TSNE(dimensions)
 
             input_embeddings = input_emb.fit_transform(input_arr)
             config_embeddings = config_emb.fit_transform(config_arr)
@@ -610,8 +610,10 @@ def evaluate_cv(
     make_latex_tables(full_df, result_dir=result_dir)
 
 
-def main(data_dir, system, performance, method, dimensions, epochs, output_dir):
-    run_timestamp = datetime.datetime.now().isoformat(timespec="minutes", sep="-").replace(":", "-")
+def main(data_dir, system, performance, input_properties, method, dimensions, epochs, output_dir):
+    run_timestamp = (
+        datetime.datetime.now().isoformat(timespec="minutes", sep="-").replace(":", "-")
+    )
     result_dir = os.path.join(
         output_dir, f"{run_timestamp}_{system}_{method}_d{dimensions}"
     )
@@ -626,7 +628,7 @@ def main(data_dir, system, performance, method, dimensions, epochs, output_dir):
         all_performances,
         input_preprocessor,
         config_preprocessor,
-    ) = load_data(system=system, data_dir=data_dir)
+    ) = load_data(system=system, data_dir=data_dir, input_properties=input_properties)
     performances = all_performances[0:1] if performance is None else [performance]
     assert all(p in all_performances for p in performances)
 
@@ -670,7 +672,10 @@ if __name__ == "__main__":
     ## Load and prepare data
     parser = argparse.ArgumentParser()
     parser.add_argument("system")
-    parser.add_argument("-p", "--performance")
+    parser.add_argument("performance")
+    parser.add_argument(
+        "-ip", "--input-properties", default="tabular", choices=["tabular", "embedding"]
+    )
     parser.add_argument(
         "-m", "--method", default="embed", choices=["embed", "pca", "tsne", "original"]
     )
@@ -688,6 +693,7 @@ if __name__ == "__main__":
         data_dir=args.data_dir,
         system=args.system,
         performance=args.performance,
+        input_properties=args.input_properties,
         method=args.method,
         dimensions=args.dimensions,
         epochs=args.epochs,
