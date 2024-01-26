@@ -14,13 +14,13 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
-def load_data(system, input_properties="tabular", data_dir="../data"):
+def load_data(system, input_properties_type="tabular", data_dir="../data"):
     if system == "nodejs":
         raise NotImplementedError(
             "We don't support nodejs / it's missing the configurationID in the measurements"
         )
 
-    if input_properties == "embedding" and system not in ("gcc",):
+    if input_properties_type == "embedding" and system not in ("gcc",):
         raise NotImplementedError(
             f"Input properties `embedding` only available for (gcc,), not `{system}`"
         )
@@ -39,7 +39,7 @@ def load_data(system, input_properties="tabular", data_dir="../data"):
         os.path.join(data_dir, system), ext="csv", with_names=True
     )
 
-    if input_properties == "embedding":
+    if input_properties_type == "embedding":
         input_properties_file = "input_embeddings.csv"
         input_columns_cat = []
         input_columns_cont = [f"v{i}" for i in range(768)]
@@ -101,7 +101,7 @@ def load_data(system, input_properties="tabular", data_dir="../data"):
     )
 
     # Prepare preprocessors, to be applied after data splitting
-    if input_properties == "embedding":
+    if input_properties_type == "embedding":
         # Input embeddings are already scaled
         input_columns_cont = []
 

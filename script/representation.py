@@ -610,7 +610,16 @@ def evaluate_cv(
     make_latex_tables(full_df, result_dir=result_dir)
 
 
-def main(data_dir, system, performance, input_properties, method, dimensions, epochs, output_dir):
+def main(
+    data_dir,
+    system,
+    performance,
+    input_properties,
+    method,
+    dimensions,
+    epochs,
+    output_dir,
+):
     run_timestamp = (
         datetime.datetime.now().isoformat(timespec="minutes", sep="-").replace(":", "-")
     )
@@ -628,7 +637,9 @@ def main(data_dir, system, performance, input_properties, method, dimensions, ep
         all_performances,
         input_preprocessor,
         config_preprocessor,
-    ) = load_data(system=system, data_dir=data_dir, input_properties=input_properties)
+    ) = load_data(
+        system=system, data_dir=data_dir, input_properties_type=input_properties
+    )
     performances = all_performances[0:1] if performance is None else [performance]
     assert all(p in all_performances for p in performances)
 
@@ -674,7 +685,10 @@ if __name__ == "__main__":
     parser.add_argument("system")
     parser.add_argument("performance")
     parser.add_argument(
-        "-ip", "--input-properties", default="tabular", choices=["tabular", "embeddings"]
+        "-ip",
+        "--input-properties",
+        default="tabular",
+        choices=["tabular", "embeddings"],
     )
     parser.add_argument(
         "-m", "--method", default="embed", choices=["embed", "pca", "tsne", "original"]
