@@ -674,7 +674,7 @@ if __name__ == "__main__":
     parser.add_argument("system")
     parser.add_argument("performance")
     parser.add_argument(
-        "-ip", "--input-properties", default="tabular", choices=["tabular", "embedding"]
+        "-ip", "--input-properties", default="tabular", choices=["tabular", "embeddings"]
     )
     parser.add_argument(
         "-m", "--method", default="embed", choices=["embed", "pca", "tsne", "original"]
