@@ -15,11 +15,6 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 def load_data(system, input_properties_type="tabular", data_dir="../data"):
-    if system == "nodejs":
-        raise NotImplementedError(
-            "We don't support nodejs / it's missing the configurationID in the measurements"
-        )
-
     if input_properties_type == "embedding" and system not in ("gcc",):
         raise NotImplementedError(
             f"Input properties `embedding` only available for (gcc,), not `{system}`"
@@ -38,6 +33,11 @@ def load_data(system, input_properties_type="tabular", data_dir="../data"):
     meas_matrix, _ = load_all_csv(
         os.path.join(data_dir, system), ext="csv", with_names=True
     )
+
+    if system == "nodejs":
+        # nodejs is missing the configurationID in the measurements
+        # We re-assign it by the line number of the measurement in the resp. file
+        meas_matrix["configurationID"] = meas_matrix.index.rename("configurationID")
 
     if input_properties_type == "embedding":
         input_properties_file = "input_embeddings.csv"
