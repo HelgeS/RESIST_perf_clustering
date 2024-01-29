@@ -358,12 +358,17 @@ def train_model(
         embeddings = torch.empty((batch.shape[0], emb_size), device=device)
         embeddings[input_row] = input_emb(train_input_arr[batch[input_row, 1]])
         embeddings[~input_row] = config_emb(train_config_arr[batch[~input_row, 1]])
+        
+        embeddings = F.normalize(embeddings, dim=1)
+        
         loss = nn.functional.triplet_margin_loss(
             anchor=embeddings[0::3],
             positive=embeddings[1::3],
             negative=embeddings[2::3],
         )
 
+        # TODO Add alternative ranking losses that prioritize top ranks
+        # TODO Make lnlos weight a parameter + hpsearch
         distmat = torch.cdist(embeddings[input_row], embeddings[~input_row])
         loss += 0.05 * lnloss(
             torch.argsort(distmat, dim=1).float(),
