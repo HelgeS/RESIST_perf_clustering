@@ -24,7 +24,14 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from torch import nn
 
-from representation import ListNetLoss, make_batch
+from representation import (
+    ListNetLoss,
+    ccc_cmp_fn,
+    cii_cmp_fn,
+    icc_cmp_fn,
+    iii_cmp_fn,
+    make_batch,
+)
 
 # %%
 data_dir = "../data/"
@@ -43,40 +50,30 @@ dimensions = 8
 ) = load_data(
     system=system, data_dir=data_dir, input_properties_type=input_properties_type
 )
-performance = all_performances[0:1]
+performance = all_performances[0]
 
 print(f"Loaded data for `{system}`")
 print(f"perf_matrix:{perf_matrix.shape}")
 print(f"input_features(before preprocessing):{input_features.shape}")
 print(f"config_features(before preprocessing):{config_features.shape}")
 
-# This is a look up for performance measurements from inputname + configurationID
-input_config_map = (
-    perf_matrix[["inputname", "configurationID"] + performances]
+# This covers both train and test data
+input_config_map_all = (
+    perf_matrix[["inputname", "configurationID"] + [performance]]
     .sort_values(["inputname", "configurationID"])
     .set_index(["inputname", "configurationID"])
 )
 
-regret_map = input_config_map.groupby("inputname").transform(
-    lambda x: (x - x.min()) / (x.max() - x.min())
+regret_map_all = input_config_map_all.groupby("inputname").transform(
+    lambda x: ((x - x.min()) / (x.max() - x.min())) #.fillna(0)
 )
 
-rank_map = input_config_map.groupby("inputname").transform(
+rank_map_all = input_config_map_all.groupby("inputname").transform(
     lambda x: stats.rankdata(x, method="min")
 )
 
-# %%
 
-rank_arr = torch.from_numpy(
-    rank_map.reset_index()
-    .pivot_table(index="inputname", columns="configurationID", values=performances[0])
-    .values
-)
-regret_arr = torch.from_numpy(
-    regret_map.reset_index()
-    .pivot_table(index="inputname", columns="configurationID", values=performances[0])
-    .values
-)
+# %%
 
 data_split = split_data(perf_matrix)
 
@@ -84,6 +81,24 @@ train_inp = data_split["train_inp"]
 train_cfg = data_split["train_cfg"]
 test_inp = data_split["test_inp"]
 test_cfg = data_split["test_cfg"]
+train_data = data_split["train_data"]
+
+# This is a look up for performance measurements from inputname + configurationID
+# It only covers the training data
+input_config_map = (
+    train_data[["inputname", "configurationID"] + [performance]]
+    .sort_values(["inputname", "configurationID"])
+    .set_index(["inputname", "configurationID"])
+)
+
+regret_map = input_config_map.groupby("inputname").transform(
+    lambda x: ((x - x.min()) / (x.max() - x.min())) #.fillna(0)
+)
+
+rank_map = input_config_map.groupby("inputname").transform(
+    lambda x: stats.rankdata(x, method="min")
+)
+
 
 # Prepare and select training/test data according to random split
 train_input_mask = input_features.index.isin(train_inp)
@@ -103,8 +118,6 @@ train_config_arr = config_arr[train_config_mask]
 
 # %%
 
-error_regret = regret_map
-
 emb_size = dimensions
 num_input_features = train_input_arr.shape[1]
 num_config_features = train_config_arr.shape[1]
@@ -112,7 +125,7 @@ input_map = {s: i for i, s in enumerate(train_inp)}
 config_map = {s: i for i, s in enumerate(train_cfg)}
 batch_size = 1024
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = "cpu" #torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 input_emb = nn.Sequential(
     nn.Linear(num_input_features, 64),
@@ -160,14 +173,12 @@ patience = 200
 
 # For evaluation
 rank_arr = torch.from_numpy(
-    rank_map.loc[(train_inp, train_cfg), :]
-    .reset_index()
+    rank_map.reset_index()
     .pivot_table(index="inputname", columns="configurationID", values=performance)
     .values
 ).to(device)
 regret_arr = torch.from_numpy(
-    error_regret.loc[(train_inp, train_cfg), :]
-    .reset_index()
+    regret_map.reset_index()
     .pivot_table(index="inputname", columns="configurationID", values=performance)
     .values
 ).to(device)
@@ -187,7 +198,67 @@ with torch.no_grad():
     emb_lookup[: train_input_arr.shape[0]] = input_emb(train_input_arr)
     emb_lookup[train_input_arr.shape[0] :] = config_emb(train_config_arr)
 
+# %%
+# TODO Restrict rank_map to training data to avoid leakage (although it should be avoided by construction here)
+# inputs = train_inp
+# configs = train_cfg
+# size = 500
+# lookup = None
 
+# batch_idx = []
+# input_indices = []
+# config_indices = []
+# for _ in range(size):
+#     task = np.random.choice(4)
+#     if task == 0:  # iii
+#         params = np.random.choice(inputs, size=3, replace=False)
+#         triplet = iii_cmp_fn(*params, rank_map=rank_map, lookup=lookup)
+#     elif task == 1:  # ccc
+#         params = np.random.choice(configs, size=3, replace=False)
+#         triplet = ccc_cmp_fn(*params, rank_map=rank_map, lookup=lookup)
+#     elif task == 2:  # icc
+#         inp = np.random.choice(inputs)
+#         cfgs = np.random.choice(rank_map.xs(inp, level=0).index, size=2, replace=False)
+#         triplet = icc_cmp_fn(inp, *cfgs, rank_map=rank_map)
+#     else:  # cii
+#         cfg = np.random.choice(configs)
+#         inps = np.random.choice(rank_map.xs(cfg, level=1).index, size=2, replace=False)
+#         triplet = cii_cmp_fn(cfg, *inps, rank_map=rank_map)
+
+#     t, a, p, n = triplet
+#     batch_idx.append(
+#         (
+#             t[0] == "i",
+#             input_map[a] if t[0] == "i" else config_map[a],
+#             t[1] == "i",
+#             input_map[p] if t[1] == "i" else config_map[p],
+#             t[2] == "i",
+#             input_map[n] if t[2] == "i" else config_map[n],
+#         )
+#     )
+#     if t[0] == "i":
+#         input_indices.append(input_map[a])
+#     else:
+#         config_indices.append(config_map[a])
+
+#     if t[1] == "i":
+#         input_indices.append(input_map[p])
+#     else:
+#         config_indices.append(config_map[p])
+
+#     if t[2] == "i":
+#         input_indices.append(input_map[n])
+#     else:
+#         config_indices.append(config_map[n])
+
+# batch = (
+#     torch.tensor(batch_idx),
+#     torch.tensor(input_indices),
+#     torch.tensor(config_indices),
+# )
+
+
+# batch
 
 # %%
 for iteration in range(3):
@@ -259,3 +330,5 @@ loss += 0.05 * lnloss(
 
 # q: cfg, r: cfg
 # TODO rank correlation
+
+# %%
