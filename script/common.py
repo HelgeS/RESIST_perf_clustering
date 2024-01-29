@@ -67,18 +67,26 @@ def load_data(system, input_properties_type="tabular", data_dir="../data"):
     if system == "gcc":
         # size=0 outputs in gcc seem to be invalid
         perf_matrix = perf_matrix[perf_matrix["size"] > 0]
+
+        # # we filter all inputs that have no variation in the final size for all configurations
+        # perf_matrix = perf_matrix[
+        #     perf_matrix[["inputname", "size"]]
+        #     .groupby("inputname")["size"]
+        #     .transform("std")
+        #     > 0
+        # ]
     elif system == "lingeling":
         # cps=0 outputs in lingeling seem to be invalid
         perf_matrix = perf_matrix[perf_matrix["cps"] > 0]
-    elif system == "poppler":
-        # we filter all inputs that have no variation in the final size for all configurations
-        # TODO This could be a general rule, not only for poppler
-        perf_matrix = perf_matrix[
-            perf_matrix[["inputname", "size"]]
-            .groupby("inputname")["size"]
-            .transform("std")
-            > 0
-        ]
+    # elif system == "poppler":
+    #     # we filter all inputs that have no variation in the final size for all configurations
+    #     # TODO This could be a general rule, not only for poppler
+    #     perf_matrix = perf_matrix[
+    #         perf_matrix[["inputname", "size"]]
+    #         .groupby("inputname")["size"]
+    #         .transform("std")
+    #         > 0
+    #     ]
     elif system == "x264":
         # perf_matrix["rel_size"] = perf_matrix["size"] / perf_matrix["ORIG_SIZE"]  # We have `kbs` which is a better alternative
         # perf_matrix["rel_size"] = np.log(perf_matrix["rel_size"])  # To scale value distribution more evenly
@@ -86,6 +94,15 @@ def load_data(system, input_properties_type="tabular", data_dir="../data"):
         perf_matrix["fps"] = -perf_matrix[
             "fps"
         ]  # fps is the only increasing performance measure
+
+    perf_matrix = perf_matrix[
+        (
+            perf_matrix[["inputname"] + performances]
+            .groupby("inputname")
+            .transform("std")
+            > 0
+        ).all(axis=1)
+    ]
 
     # Separate input + config features
     input_features = (
@@ -432,7 +449,7 @@ def top_k_closest_euclidean_with_masks(emb, query_mask, reference_mask, k):
 def ensure_tensor(x):
     if isinstance(x, torch.Tensor):
         return x
-    
+
     return torch.from_numpy(x)
 
 
@@ -521,6 +538,7 @@ def evaluate_ii(
         ) * 100
 
     return best_rank, best_regret, share_ratios
+
 
 # TODO There is no reason this uses torch, it should be numpy
 def evaluate_cc(
