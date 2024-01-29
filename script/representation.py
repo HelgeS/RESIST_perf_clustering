@@ -116,11 +116,15 @@ def make_batch(
             triplet = ccc_cmp_fn(*params, rank_map=rank_map, lookup=lookup)
         elif task == 2:  # icc
             inp = np.random.choice(inputs)
-            cfgs = np.random.choice(configs, size=2, replace=False)
+            cfgs = np.random.choice(
+                rank_map.xs(inp, level=0).index, size=2, replace=False
+            )
             triplet = icc_cmp_fn(inp, *cfgs, rank_map=rank_map)
         else:  # cii
             cfg = np.random.choice(configs)
-            inps = np.random.choice(inputs, size=2, replace=False)
+            inps = np.random.choice(
+                rank_map.xs(cfg, level=1).index, size=2, replace=False
+            )
             triplet = cii_cmp_fn(cfg, *inps, rank_map=rank_map)
 
         t, a, p, n = triplet
@@ -358,9 +362,9 @@ def train_model(
         embeddings = torch.empty((batch.shape[0], emb_size), device=device)
         embeddings[input_row] = input_emb(train_input_arr[batch[input_row, 1]])
         embeddings[~input_row] = config_emb(train_config_arr[batch[~input_row, 1]])
-        
+
         embeddings = F.normalize(embeddings, dim=1)
-        
+
         loss = nn.functional.triplet_margin_loss(
             anchor=embeddings[0::3],
             positive=embeddings[1::3],
