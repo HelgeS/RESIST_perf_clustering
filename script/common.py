@@ -705,7 +705,8 @@ def evaluate_prediction(
         )
     )
 
-    m = MLPRegressor(hidden_layer_sizes=(64,))
+    # TODO Scale inputs?
+    m = MLPRegressor(hidden_layer_sizes=(64,), tol=0.0001)
     m.fit(X_train, y_train.ravel())
     # print("Train score", m.score(X_train, y_train))
     train_mape = mean_absolute_percentage_error(y_train, m.predict(X_train))
