@@ -399,13 +399,15 @@ def evaluate_ic(
     cfg_ranks = (
         (torch.gather(rank_arr, 1, top_cfg).float() - 1) / rank_arr.shape[1] * 100
     )
-    best_rank = cfg_ranks.min(axis=1)[0].mean()
-    avg_rank = cfg_ranks.mean(axis=1).mean()
+    best_rank = (
+        cfg_ranks.nan_to_num(torch.finfo(cfg_ranks.dtype).max).min(axis=1)[0].mean()
+    )
+    avg_rank = cfg_ranks.nanmean(axis=1).mean()
 
     # Regret
     cfg_regret = torch.gather(regret_arr, 1, top_cfg).float() * 100
-    best_regret = cfg_regret.min(axis=1)[0].mean()
-    avg_regret = cfg_regret.mean(axis=1).mean()
+    best_regret = cfg_regret.nan_to_num(torch.finfo(cfg_regret.dtype).max).min(axis=1)[0].mean()
+    avg_regret = cfg_regret.nanmean(axis=1).mean()
 
     return best_rank, avg_rank, best_regret, avg_regret
 
@@ -485,10 +487,10 @@ def evaluate_ii(
     top_r_regret_per_neighbor = []
     for r in top_inp:
         top_r_ranks_per_neighbor.append(
-            torch.topk(rank_arr[r, :], k=max_r, dim=1, largest=False).indices
+            torch.topk(rank_arr[r, ~torch.isnan(rank_arr[r, :])], k=max_r, dim=1, largest=False).indices
         )
         top_r_regret_per_neighbor.append(
-            torch.topk(regret_arr[r, :], k=max_r, dim=1, largest=False).values
+            torch.topk(regret_arr[r, ~torch.isnan(regret_arr[r, :])], k=max_r, dim=1, largest=False).values
         )
 
     top_r_ranks_per_neighbor = torch.stack(top_r_ranks_per_neighbor)

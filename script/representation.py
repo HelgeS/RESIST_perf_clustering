@@ -248,6 +248,17 @@ class ListNetLoss(nn.Module):
         pred_scores: Tensor of predicted scores (batch_size x list_size)
         true_scores: Tensor of ground truth scores (batch_size x list_size)
         """
+
+        true_nan = torch.isnan(true_scores)
+        true_scores[true_nan] = float('-inf')
+        pred_scores[true_nan] = float('-inf')
+
+        if true_scores.max() > 1:
+            true_scores = true_scores/true_scores.max()
+
+        if pred_scores.max() > 1:
+            pred_scores = pred_scores/pred_scores.max()
+
         # Convert scores to probabilities
         pred_probs = F.softmax(pred_scores, dim=1)
         true_probs = F.softmax(true_scores, dim=1)
@@ -308,7 +319,7 @@ def train_model(
     best_loss = np.inf
     best_loss_iter = 0
     best_logmsg = None
-    best_models = (None, None)
+    best_models = (copy.deepcopy(input_emb), copy.deepcopy(config_emb))
     patience = 200
 
     # TODO For our dataset size it is relatively cheap to calculate the embeddings for all inputs and configs.
@@ -382,7 +393,7 @@ def train_model(
             torch.argsort(distmat.T, dim=1).float(),
             rank_arr_cfg[config_indices, :][:, input_indices].float(),
         )
-
+        
         loss.backward()
         optimizer.step()
         total_loss += loss.cpu().item()
@@ -457,8 +468,6 @@ def evaluate_cv(
     input_preprocessor,
     config_preprocessor,
     performances,
-    regret_map,
-    rank_map,
     random_seed=59590,
     topk_values=(1, 3, 5, 15, 25),
     topr_values=(1, 3, 5, 15, 25),
@@ -466,29 +475,30 @@ def evaluate_cv(
     dfs = []
     mape = []
 
-    # Number of nearest neighbours to consider
-    # Make multiples to allow better budget comparison
-
-    rank_arr = torch.from_numpy(
-        rank_map.reset_index()
-        .pivot_table(
-            index="inputname", columns="configurationID", values=performances[0]
-        )
-        .values
-    )
-    regret_arr = torch.from_numpy(
-        regret_map.reset_index()
-        .pivot_table(
-            index="inputname", columns="configurationID", values=performances[0]
-        )
-        .values
-    )
+    torch.random.seed(random_seed)
+    np.random.seed(random_seed)
 
     for data_split in split_data_cv(perf_matrix, random_state=random_seed):
         train_inp = data_split["train_inp"]
         train_cfg = data_split["train_cfg"]
         test_inp = data_split["test_inp"]
         test_cfg = data_split["test_cfg"]
+        train_data = data_split["train_data"]
+
+        # This is a look up for performance measurements from inputname + configurationID
+        input_config_map = (
+            train_data[["inputname", "configurationID"] + performances]
+            .sort_values(["inputname", "configurationID"])
+            .set_index(["inputname", "configurationID"])
+        )
+
+        regret_map = input_config_map.groupby("inputname").transform(
+            lambda x: (x - x.min()) / (x.max() - x.min())
+        )
+
+        rank_map = input_config_map.groupby("inputname").transform(
+            lambda x: stats.rankdata(x, method="min")
+        )
 
         # Prepare and select training/test data according to random split
         train_input_mask = input_features.index.isin(train_inp)
@@ -523,13 +533,13 @@ def evaluate_cv(
                 performance=performances[0],
             )
             input_emb, config_emb = best_models
+            input_emb = input_emb.cpu()
+            config_emb = config_emb.cpu()
 
             with torch.no_grad():
                 input_embeddings = input_emb(input_arr).numpy()
                 config_embeddings = config_emb(config_arr).numpy()
 
-            input_emb = input_emb.cpu()
-            config_emb = config_emb.cpu()
         elif method == "tsne":
             # T-SNE from scikit-learn has no fit/transform split
             # Therefore we fit on the whole dataset, which is not direcly comparable
@@ -592,12 +602,35 @@ def evaluate_cv(
         print(f"MAPE:{train_mape:.3f} / {test_mape:.3f}")
         mape.append((train_mape, test_mape))
 
+        input_config_map_all = (
+            perf_matrix[["inputname", "configurationID"] + performances]
+            .sort_values(["inputname", "configurationID"])
+            .set_index(["inputname", "configurationID"])
+        )
+
+        rank_arr_all = torch.from_numpy(
+            input_config_map_all.groupby("inputname", as_index=False)
+            .transform(lambda x: stats.rankdata(x, method="min"))
+            .pivot_table(
+                index="inputname", columns="configurationID", values=performances[0]
+            )
+            .values
+        )
+        regret_arr_all = torch.from_numpy(
+            input_config_map_all.groupby("inputname", as_index=False)
+            .transform(lambda x: ((x - x.min()) / (x.max() - x.min())))
+            .pivot_table(
+                index="inputname", columns="configurationID", values=performances[0]
+            )
+            .values
+        )
+
         ## Detailed retrieval results
         result_df = evaluate_retrieval(
             topk_values=topk_values,
             topr_values=topr_values,
-            rank_arr=rank_arr,
-            regret_arr=regret_arr,
+            rank_arr=rank_arr_all,
+            regret_arr=regret_arr_all,
             train_input_mask=train_input_mask,
             test_input_mask=test_input_mask,
             train_config_mask=train_config_mask,
@@ -657,21 +690,6 @@ def main(
     print(f"input_features(before preprocessing):{input_features.shape}")
     print(f"config_features(before preprocessing):{config_features.shape}")
 
-    # This is a look up for performance measurements from inputname + configurationID
-    input_config_map = (
-        perf_matrix[["inputname", "configurationID"] + performances]
-        .sort_values(["inputname", "configurationID"])
-        .set_index(["inputname", "configurationID"])
-    )
-
-    regret_map = input_config_map.groupby("inputname").transform(
-        lambda x: (x - x.min()) / (x.max() - x.min())
-    )
-
-    rank_map = input_config_map.groupby("inputname").transform(
-        lambda x: stats.rankdata(x, method="min")
-    )
-
     evaluate_cv(
         method,
         dimensions,
@@ -683,8 +701,6 @@ def main(
         input_preprocessor,
         config_preprocessor,
         performances,
-        regret_map,
-        rank_map,
     )
 
 
@@ -709,8 +725,11 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", default="../data")
     parser.add_argument("-o", "--output", default="../results/")
 
-    # args = parser.parse_args(["poppler", "-m=pca", "-d=3", "--data-dir", "data/", "--epochs=20"])
-    args = parser.parse_args()
+    # args = parser.parse_args(["poppler", "size", "-m=pca", "-d=3", "--data-dir", "data/", "--epochs=20"])
+    args = parser.parse_args(
+        ["gcc", "size", "-m=embed", "-d=3", "--data-dir", "data/", "--epochs=20"]
+    )
+    # args = parser.parse_args()
 
     main(
         data_dir=args.data_dir,
