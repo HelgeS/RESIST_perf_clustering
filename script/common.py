@@ -716,35 +716,19 @@ def evaluate_prediction(
 
 
 def make_latex_tables(full_df, result_dir, verbose=True):
-    dfmean = (
-        full_df.reset_index()
-        .groupby(["mode", "split", "metric", "k"], as_index=False)
-        .mean()
-    )
+    dfmean = full_df.groupby(["mode", "split", "metric", "k"]).mean()
 
     m_ii = pd.concat(
         (
-            dfmean[
-                (dfmean["mode"] == "ii")
-                & (dfmean["split"] == "test")
-                & (dfmean["metric"] == "rank")
-            ]
-            .drop(columns=["mode", "split", "metric"])
-            .set_index("k"),
-            dfmean[
-                (dfmean["mode"] == "ii")
-                & (dfmean["split"] == "test")
-                & (dfmean["metric"] == "ratio")
-            ]
-            .drop(columns=["mode", "split", "metric"])
-            .set_index("k"),
-            dfmean[
-                (dfmean["mode"] == "ii")
-                & (dfmean["split"] == "test")
-                & (dfmean["metric"] == "regret")
-            ]
-            .drop(columns=["mode", "split", "metric"])
-            .set_index("k"),
+            dfmean.loc[("ii", "test", "rank")].drop(
+                columns=["mode", "split", "metric"], level=0
+            ),
+            dfmean.loc[("ii", "test", "ratio")].drop(
+                columns=["mode", "split", "metric"], level=0
+            ),
+            dfmean.loc[("ii", "test", "regret")].drop(
+                columns=["mode", "split", "metric"], level=0
+            ),
         ),
         axis=1,
         keys=["rank", "ratio", "regret"],
@@ -767,27 +751,15 @@ def make_latex_tables(full_df, result_dir, verbose=True):
 
     m_cc = pd.concat(
         (
-            dfmean[
-                (dfmean["mode"] == "cc")
-                & (dfmean["split"] == "test")
-                & (dfmean["metric"] == "rank")
-            ]
-            .drop(columns=["mode", "split", "metric"])
-            .set_index("k"),
-            dfmean[
-                (dfmean["mode"] == "cc")
-                & (dfmean["split"] == "test")
-                & (dfmean["metric"] == "ratio")
-            ]
-            .drop(columns=["mode", "split", "metric"])
-            .set_index("k"),
-            dfmean[
-                (dfmean["mode"] == "cc")
-                & (dfmean["split"] == "test")
-                & (dfmean["metric"] == "regret")
-            ]
-            .drop(columns=["mode", "split", "metric"])
-            .set_index("k"),
+            dfmean.loc[("cc", "test", "rank")].drop(
+                columns=["mode", "split", "metric"], level=0
+            ),
+            dfmean.loc[("cc", "test", "ratio")].drop(
+                columns=["mode", "split", "metric"], level=0
+            ),
+            dfmean.loc[("cc", "test", "regret")].drop(
+                columns=["mode", "split", "metric"], level=0
+            ),
         ),
         axis=1,
         keys=["rank", "ratio", "regret"],
