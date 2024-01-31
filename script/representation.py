@@ -250,14 +250,14 @@ class ListNetLoss(nn.Module):
         """
 
         true_nan = torch.isnan(true_scores)
-        true_scores[true_nan] = float('-inf')
-        pred_scores[true_nan] = float('-inf')
+        true_scores[true_nan] = float("-inf")
+        pred_scores[true_nan] = float("-inf")
 
         if true_scores.max() > 1:
-            true_scores = true_scores/true_scores.max()
+            true_scores = true_scores / true_scores.max()
 
         if pred_scores.max() > 1:
-            pred_scores = pred_scores/pred_scores.max()
+            pred_scores = pred_scores / pred_scores.max()
 
         # Convert scores to probabilities
         pred_probs = F.softmax(pred_scores, dim=1)
