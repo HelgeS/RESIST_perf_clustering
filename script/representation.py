@@ -282,7 +282,7 @@ def train_model(
     num_config_features = train_config_arr.shape[1]
     input_map = {s: i for i, s in enumerate(train_inp)}
     config_map = {s: i for i, s in enumerate(train_cfg)}
-    batch_size = 1024
+    batch_size = 256
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -479,6 +479,9 @@ def evaluate_cv(
     np.random.seed(random_seed)
 
     for data_split in split_data_cv(perf_matrix, random_state=random_seed):
+        if data_split["split"] == 0:
+            continue
+
         train_inp = data_split["train_inp"]
         train_cfg = data_split["train_cfg"]
         test_inp = data_split["test_inp"]
