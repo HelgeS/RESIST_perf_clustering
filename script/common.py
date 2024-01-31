@@ -11,6 +11,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.neural_network import MLPRegressor
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
@@ -399,14 +400,12 @@ def evaluate_ic(
     cfg_ranks = (
         (torch.gather(rank_arr, 1, top_cfg).float() - 1) / rank_arr.shape[1] * 100
     )
-    best_rank = (
-        cfg_ranks.nan_to_num(torch.finfo(cfg_ranks.dtype).max).min(axis=1)[0].mean()
-    )
+    best_rank = nanmin(cfg_ranks, dim=1)[0].mean()
     avg_rank = cfg_ranks.nanmean(axis=1).mean()
 
     # Regret
     cfg_regret = torch.gather(regret_arr, 1, top_cfg).float() * 100
-    best_regret = cfg_regret.nan_to_num(torch.finfo(cfg_regret.dtype).max).min(axis=1)[0].mean()
+    best_regret = nanmin(cfg_regret, dim=1)[0].mean()
     avg_regret = cfg_regret.nanmean(axis=1).mean()
 
     return best_rank, avg_rank, best_regret, avg_regret
@@ -473,47 +472,63 @@ def evaluate_ii(
     - The best rank any of the recommendations achieves on the query inputs
     - The best regret any of the recommendations achieves on the query inputs
     - The ratio of configurations that are common in the recommendations.
+
+    If more configurations are asked then are available, we return all of them.
     """
-    top_inp = top_k_closest_euclidean_with_masks(
+    query_neighbors = top_k_closest_euclidean_with_masks(
         input_representation,
         query_mask=query_mask,
         reference_mask=reference_mask,
         k=n_neighbors,
     )
 
-    # Foreach close input
-    max_r = np.minimum(np.max(n_recs), rank_arr.shape[1])
-    top_r_ranks_per_neighbor = []
-    top_r_regret_per_neighbor = []
-    for r in top_inp:
-        top_r_ranks_per_neighbor.append(
-            torch.topk(rank_arr[r, ~torch.isnan(rank_arr[r, :])], k=max_r, dim=1, largest=False).indices
-        )
-        top_r_regret_per_neighbor.append(
-            torch.topk(regret_arr[r, ~torch.isnan(regret_arr[r, :])], k=max_r, dim=1, largest=False).values
-        )
-
-    top_r_ranks_per_neighbor = torch.stack(top_r_ranks_per_neighbor)
-    top_r_regret_per_neighbor = torch.stack(top_r_regret_per_neighbor)
-
     share_ratios = torch.zeros(len(n_recs))
     best_regret = torch.zeros(len(n_recs))
     best_rank = torch.zeros(len(n_recs))
-    n_queries = top_inp.shape[0]
 
     for i, r in enumerate(n_recs):
         if r > rank_arr.shape[1]:
             # We can't ask for more neighbors than exist
             continue
 
+        top_recs_per_query = []
+
+        for neighbors in query_neighbors:
+            # TODO Here we need all topk recommendations per neighbor
+            # Then we do not care about the order anymore and can put them all into a single list
+            # We can use topk_ignore_nan in this step
+            # If we store everything in lists, we can start with max_r and select later
+            indices, _ = topk_ignore_nan(
+                rank_arr[neighbors, :], k=r, dim=1, largest=False
+            )
+            top_recs_per_query.append(indices.reshape((-1,)))
+            # top_recs_per_query.append(torch.topk(
+            #     rank_arr[neighbors, :].nan_to_num(
+            #         torch.finfo(rank_arr.dtype).max
+            #     ),
+            #     k=r,
+            #     dim=1,
+            #     largest=False,
+            # ).indices.reshape((-1,)))
+
         # Ix(k*r) -> r highest ranked configs * k neighbors
-        reduced_top_r = top_r_ranks_per_neighbor[:, :, :r].reshape(n_queries, -1)
+        # reduced_top_r = torch.stack(top_r_ranks_per_neighbor).reshape(n_queries, -1)
+
+        # TODO Neighbors can recommend configurations for which we 
+        # do not have the groundtruth for the query!!!
+        # This is a limitation if we drop partial configurations from the dataset
+        # How can we handle it?
+        # a) Ignore missing recommended configurations -> bad?
+        # b) Only use inputs with full configuration set -> maybe unrealistic, but necessary for experimental setup
+        # c) Don't drop measurements but find another way to handle them -> how?
+        # TODO Check how many incomplete inputs we have, maybe it's okay to drop some
+            
 
         # Look-up the regret of the recommended configs on the query input
         # Per input take the best regret and the average over all query inputs
         best_regret[i] = (
             torch.tensor(
-                [regret_arr[j, cfgs].min() for j, cfgs in enumerate(reduced_top_r)]
+                [regret_arr[j, cfgs].min() for j, cfgs in enumerate(top_recs_per_query)]
             ).mean()
             * 100
         )
@@ -521,8 +536,10 @@ def evaluate_ii(
         best_rank[i] = (
             (
                 torch.tensor(
-                    [rank_arr[j, cfgs].min() for j, cfgs in enumerate(reduced_top_r)],
-                    dtype=torch.float,
+                    [
+                        rank_arr[j, cfgs].min()
+                        for j, cfgs in enumerate(top_recs_per_query)
+                    ]
                 ).mean()
                 - 1
             )
@@ -530,13 +547,17 @@ def evaluate_ii(
             * 100
         )
 
-        # We must have at least r x num configs unique elements
-        count_offset = n_queries * r
-        uniq_vals = torch.tensor([torch.unique(row).numel() for row in reduced_top_r])
+        # We count configurations. r configs get recommended.
+        # Therefore, there must be r unique elements
+        # We must have at least r x num queries unique elements
+        uniq_recs_per_query = (
+            torch.tensor([torch.unique(row).numel() for row in top_recs_per_query]) - r
+        )
+        num_recs_per_query = (
+            torch.tensor([row.numel() for row in top_recs_per_query]) - r
+        )
         share_ratios[i] = (
-            1
-            - (torch.sum(uniq_vals) - count_offset)
-            / (reduced_top_r.numel() - count_offset)
+            1 - uniq_recs_per_query.sum() / num_recs_per_query.sum()
         ) * 100
 
     return best_rank, best_regret, share_ratios
@@ -707,8 +728,9 @@ def evaluate_prediction(
         )
     )
 
-    # TODO Scale inputs?
-    m = MLPRegressor(hidden_layer_sizes=(64,), tol=0.0001)
+    m = make_pipeline(
+        StandardScaler(), MLPRegressor(hidden_layer_sizes=(64,), tol=0.0001)
+    )
     m.fit(X_train, y_train.ravel())
     # print("Train score", m.score(X_train, y_train))
     train_mape = mean_absolute_percentage_error(y_train, m.predict(X_train))
@@ -950,3 +972,56 @@ def evaluate_retrieval(
     ]
 
     return result_dataframes
+
+
+def nanmax(tensor, dim=None):
+    if torch.is_floating_point(tensor):
+        min_value = torch.finfo(tensor.dtype).min
+    else:
+        min_value = torch.iinfo(tensor.dtype).min
+
+    if dim:
+        output = tensor.nan_to_num(min_value).max(dim=dim)
+    else:
+        output = tensor.nan_to_num(min_value).max()
+
+    return output
+
+
+def nanmin(tensor, dim=None):
+    if torch.is_floating_point(tensor):
+        max_value = torch.finfo(tensor.dtype).max
+    else:
+        max_value = torch.iinfo(tensor.dtype).max
+
+    if dim:
+        output = tensor.nan_to_num(max_value).min(dim=dim)
+    else:
+        output = tensor.nan_to_num(max_value).min()
+
+    return output
+
+
+def topk_ignore_nan(input_tensor, k, dim=-1, largest=True):
+    # Create a mask for NaN values
+    nan_mask = torch.isnan(input_tensor)
+
+    # Clone the input tensor to avoid modifying it directly
+    cloned_tensor = input_tensor.clone()
+
+    # Replace NaNs with a very small number
+    cloned_tensor[nan_mask] = float("-inf") if largest else float("inf")
+
+    # Use the regular topk function
+    res = torch.topk(cloned_tensor, k=k, dim=dim, largest=largest)
+
+    # Identify which of the top k values were originally NaNs
+    original_nan_mask = nan_mask.gather(1, res.indices)
+
+    # indices = res.indices.float()
+    # indices[original_nan_mask] = float("nan")
+
+    # values = res.values.float()
+    # values[original_nan_mask] = float("nan")
+
+    return res.indices[~original_nan_mask], res.values[~original_nan_mask]
