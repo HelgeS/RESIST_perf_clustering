@@ -475,7 +475,7 @@ def evaluate_cv(
     dfs = []
     mape = []
 
-    torch.random.seed(random_seed)
+    torch.manual_seed(random_seed)
     np.random.seed(random_seed)
 
     for data_split in split_data_cv(perf_matrix, random_state=random_seed):
