@@ -53,10 +53,18 @@ def load_data(system, input_properties_type="tabular", data_dir="../data"):
     ).set_index("id")  # id needed?
 
     # Rename columns with same name in inputs/perf. prediction to avoid errors later
-    # Affects imagemagick
+    # Affects imagemagick and xz
     for c in input_properties.columns:
         if c in performances or c in config_columns:
-            input_properties.rename(columns={c: f"inp_{c}"}, inplace=True)
+            new_col_name = f"inp_{c}"
+            input_properties.rename(columns={c: new_col_name}, inplace=True)
+
+            if c in input_columns_cat:
+                input_columns_cat.remove(c)
+                input_columns_cat.append(new_col_name)
+            elif c in input_columns_cont:
+                input_columns_cont.remove(c)
+                input_columns_cont.append(new_col_name)
 
     perf_matrix = pd.merge(
         meas_matrix, input_properties, left_on="inputname", right_on="name"
@@ -136,7 +144,11 @@ def load_data(system, input_properties_type="tabular", data_dir="../data"):
             ("num", StandardScaler(), input_columns_cont),
             (
                 "cat",
-                OneHotEncoder(min_frequency=1, handle_unknown="infrequent_if_exist"),
+                OneHotEncoder(
+                    min_frequency=1,
+                    handle_unknown="infrequent_if_exist",
+                    sparse_output=False,
+                ),
                 input_columns_cat,
             ),
         ],
@@ -147,7 +159,11 @@ def load_data(system, input_properties_type="tabular", data_dir="../data"):
             ("num", StandardScaler(), config_columns_cont),
             (
                 "cat",
-                OneHotEncoder(min_frequency=1, handle_unknown="infrequent_if_exist"),
+                OneHotEncoder(
+                    min_frequency=1,
+                    handle_unknown="infrequent_if_exist",
+                    sparse_output=False,
+                ),
                 config_columns_cat,
             ),
         ],
