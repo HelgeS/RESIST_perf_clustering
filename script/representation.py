@@ -11,17 +11,16 @@ import torch.nn.functional as F
 from common import (
     evaluate_ic,
     evaluate_ii,
+    evaluate_prediction,
+    evaluate_retrieval,
     load_data,
     make_latex_tables,
     split_data_cv,
-    evaluate_prediction,
-    evaluate_retrieval,
 )
 from scipy import stats
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from torch import nn
-
 
 # Purpose of this file
 # We learn a simple embedding of the input and configuration vectors
@@ -383,7 +382,7 @@ def train_model(
         )
 
         # TODO Add alternative ranking losses that prioritize top ranks
-        # TODO Make lnlos weight a parameter + hpsearch
+        # TODO Make lnloss weight a parameter + hpsearch
         distmat = torch.cdist(embeddings[input_row], embeddings[~input_row])
         loss += 0.05 * lnloss(
             torch.argsort(distmat, dim=1).float(),
@@ -393,7 +392,7 @@ def train_model(
             torch.argsort(distmat.T, dim=1).float(),
             rank_arr_cfg[config_indices, :][:, input_indices].float(),
         )
-        
+
         loss.backward()
         optimizer.step()
         total_loss += loss.cpu().item()
@@ -479,9 +478,6 @@ def evaluate_cv(
     np.random.seed(random_seed)
 
     for data_split in split_data_cv(perf_matrix, random_state=random_seed):
-        if data_split["split"] == 0:
-            continue
-
         train_inp = data_split["train_inp"]
         train_cfg = data_split["train_cfg"]
         test_inp = data_split["test_inp"]
@@ -729,10 +725,10 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", default="../results/")
 
     # args = parser.parse_args(["poppler", "size", "-m=pca", "-d=3", "--data-dir", "data/", "--epochs=20"])
-    args = parser.parse_args(
-        ["gcc", "size", "-m=embed", "-d=3", "--data-dir", "data/", "--epochs=20"]
-    )
-    # args = parser.parse_args()
+    # args = parser.parse_args(
+    #     ["xz", "size", "-m=embed", "-d=3", "--data-dir", "data/", "--epochs=20"]
+    # )
+    args = parser.parse_args()
 
     main(
         data_dir=args.data_dir,
