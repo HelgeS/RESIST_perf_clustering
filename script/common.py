@@ -63,31 +63,29 @@ def load_data(system, input_properties_type="tabular", data_dir="../data"):
     ).sort_values(by=["inputname", "configurationID"])
     del perf_matrix["name"]
 
+    inputs_before_filter = len(perf_matrix.inputname.unique())
+    configs_before_filter = len(perf_matrix.configurationID.unique())
+    assert (
+        inputs_before_filter * configs_before_filter == perf_matrix.shape[0]
+    ), "Num. inputs * num. configs does not match measurement matrix before filtering"
+
     # System-specific adjustments
-    # TODO Could be made part of the preprocessed datasets
     if system == "gcc":
         # size=0 outputs in gcc seem to be invalid
-        perf_matrix = perf_matrix[perf_matrix["size"] > 0]
-
-        # # we filter all inputs that have no variation in the final size for all configurations
-        # perf_matrix = perf_matrix[
-        #     perf_matrix[["inputname", "size"]]
-        #     .groupby("inputname")["size"]
-        #     .transform("std")
-        #     > 0
-        # ]
+        perf_matrix = perf_matrix[
+            (
+                perf_matrix[["inputname", "size"]].groupby("inputname").transform("min")
+                > 0
+            ).values
+        ]
     elif system == "lingeling":
         # cps=0 outputs in lingeling seem to be invalid
-        perf_matrix = perf_matrix[perf_matrix["cps"] > 0]
-    # elif system == "poppler":
-    #     # we filter all inputs that have no variation in the final size for all configurations
-    #     # TODO This could be a general rule, not only for poppler
-    #     perf_matrix = perf_matrix[
-    #         perf_matrix[["inputname", "size"]]
-    #         .groupby("inputname")["size"]
-    #         .transform("std")
-    #         > 0
-    #     ]
+        perf_matrix = perf_matrix[
+            (
+                perf_matrix[["inputname", "cps"]].groupby("inputname").transform("min")
+                > 0
+            ).values
+        ]
     elif system == "x264":
         # perf_matrix["rel_size"] = perf_matrix["size"] / perf_matrix["ORIG_SIZE"]  # We have `kbs` which is a better alternative
         # perf_matrix["rel_size"] = np.log(perf_matrix["rel_size"])  # To scale value distribution more evenly
@@ -96,6 +94,7 @@ def load_data(system, input_properties_type="tabular", data_dir="../data"):
             "fps"
         ]  # fps is the only increasing performance measure
 
+    # Drop inputs with constant measurements
     perf_matrix = perf_matrix[
         (
             perf_matrix[["inputname"] + performances]
@@ -104,6 +103,15 @@ def load_data(system, input_properties_type="tabular", data_dir="../data"):
             > 0
         ).all(axis=1)
     ]
+
+    inputs_after_filter = len(perf_matrix.inputname.unique())
+    configs_after_filter = len(perf_matrix.configurationID.unique())
+    # print(
+    #     f"Removed {inputs_before_filter-inputs_after_filter} inputs and {configs_before_filter-configs_after_filter} configs"
+    # )
+    assert (
+        inputs_after_filter * configs_after_filter == perf_matrix.shape[0]
+    ), "Num. inputs * num. configs does not match measurement matrix after filtering"
 
     # Separate input + config features
     input_features = (
@@ -514,7 +522,7 @@ def evaluate_ii(
         # Ix(k*r) -> r highest ranked configs * k neighbors
         # reduced_top_r = torch.stack(top_r_ranks_per_neighbor).reshape(n_queries, -1)
 
-        # TODO Neighbors can recommend configurations for which we 
+        # TODO Neighbors can recommend configurations for which we
         # do not have the groundtruth for the query!!!
         # This is a limitation if we drop partial configurations from the dataset
         # How can we handle it?
@@ -522,7 +530,6 @@ def evaluate_ii(
         # b) Only use inputs with full configuration set -> maybe unrealistic, but necessary for experimental setup
         # c) Don't drop measurements but find another way to handle them -> how?
         # TODO Check how many incomplete inputs we have, maybe it's okay to drop some
-            
 
         # Look-up the regret of the recommended configs on the query input
         # Per input take the best regret and the average over all query inputs
