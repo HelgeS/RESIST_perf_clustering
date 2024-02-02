@@ -65,7 +65,7 @@ input_config_map_all = (
 )
 
 regret_map_all = input_config_map_all.groupby("inputname").transform(
-    lambda x: ((x - x.min()) / (x.max() - x.min())) #.fillna(0)
+    lambda x: ((x - x.min()) / (x.max() - x.min()))  # .fillna(0)
 )
 
 rank_map_all = input_config_map_all.groupby("inputname").transform(
@@ -92,7 +92,7 @@ input_config_map = (
 )
 
 regret_map = input_config_map.groupby("inputname").transform(
-    lambda x: ((x - x.min()) / (x.max() - x.min())) #.fillna(0)
+    lambda x: ((x - x.min()) / (x.max() - x.min()))  # .fillna(0)
 )
 
 rank_map = input_config_map.groupby("inputname").transform(
@@ -125,7 +125,7 @@ input_map = {s: i for i, s in enumerate(train_inp)}
 config_map = {s: i for i, s in enumerate(train_cfg)}
 batch_size = 1024
 
-device = "cpu" #torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = "cpu"  # torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 input_emb = nn.Sequential(
     nn.Linear(num_input_features, 64),
@@ -161,16 +161,6 @@ best_logmsg = None
 best_models = (None, None)
 patience = 200
 
-# TODO For our dataset size it is relatively cheap to calculate the embeddings for all inputs and configs.
-# We can every few iterations update a full collection and collect the hardest triplets from it.
-#
-# with torch.no_grad():
-#     emb_lookup = torch.empty(
-#         (train_input_arr.shape[0] + train_config_arr.shape[0], emb_size)
-#     )
-#     emb_lookup[: train_input_arr.shape[0]] = input_emb(train_input_arr)
-#     emb_lookup[train_input_arr.shape[0] :] = config_emb(train_config_arr)
-
 # For evaluation
 rank_arr = torch.from_numpy(
     rank_map.reset_index()
@@ -198,67 +188,6 @@ with torch.no_grad():
     emb_lookup[: train_input_arr.shape[0]] = input_emb(train_input_arr)
     emb_lookup[train_input_arr.shape[0] :] = config_emb(train_config_arr)
 
-# %%
-# TODO Restrict rank_map to training data to avoid leakage (although it should be avoided by construction here)
-# inputs = train_inp
-# configs = train_cfg
-# size = 500
-# lookup = None
-
-# batch_idx = []
-# input_indices = []
-# config_indices = []
-# for _ in range(size):
-#     task = np.random.choice(4)
-#     if task == 0:  # iii
-#         params = np.random.choice(inputs, size=3, replace=False)
-#         triplet = iii_cmp_fn(*params, rank_map=rank_map, lookup=lookup)
-#     elif task == 1:  # ccc
-#         params = np.random.choice(configs, size=3, replace=False)
-#         triplet = ccc_cmp_fn(*params, rank_map=rank_map, lookup=lookup)
-#     elif task == 2:  # icc
-#         inp = np.random.choice(inputs)
-#         cfgs = np.random.choice(rank_map.xs(inp, level=0).index, size=2, replace=False)
-#         triplet = icc_cmp_fn(inp, *cfgs, rank_map=rank_map)
-#     else:  # cii
-#         cfg = np.random.choice(configs)
-#         inps = np.random.choice(rank_map.xs(cfg, level=1).index, size=2, replace=False)
-#         triplet = cii_cmp_fn(cfg, *inps, rank_map=rank_map)
-
-#     t, a, p, n = triplet
-#     batch_idx.append(
-#         (
-#             t[0] == "i",
-#             input_map[a] if t[0] == "i" else config_map[a],
-#             t[1] == "i",
-#             input_map[p] if t[1] == "i" else config_map[p],
-#             t[2] == "i",
-#             input_map[n] if t[2] == "i" else config_map[n],
-#         )
-#     )
-#     if t[0] == "i":
-#         input_indices.append(input_map[a])
-#     else:
-#         config_indices.append(config_map[a])
-
-#     if t[1] == "i":
-#         input_indices.append(input_map[p])
-#     else:
-#         config_indices.append(config_map[p])
-
-#     if t[2] == "i":
-#         input_indices.append(input_map[n])
-#     else:
-#         config_indices.append(config_map[n])
-
-# batch = (
-#     torch.tensor(batch_idx),
-#     torch.tensor(input_indices),
-#     torch.tensor(config_indices),
-# )
-
-
-# batch
 
 # %%
 for iteration in range(3):
@@ -331,4 +260,33 @@ loss += 0.05 * lnloss(
 # q: cfg, r: cfg
 # TODO rank correlation
 
+# %%
+perf_predict = nn.Sequential(
+    nn.Linear(2 * emb_size, 64),
+    nn.ReLU(),
+    nn.Linear(64, 1),  # TODO Check with |P| outputs
+)
+from sklearn.preprocessing import StandardScaler
+
+scaler = StandardScaler()
+y_train = torch.from_numpy(
+    scaler.fit_transform(train_data[all_performances[0]].values.reshape(-1, 1))
+)
+
+train_indices = np.vstack(
+    (
+        train_data.configurationID.apply(
+            lambda s: np.where(train_cfg == s)[0].item()
+        ).values,
+        train_data.inputname.apply(lambda s: np.where(train_inp == s)[0].item()).values,
+    )
+).T
+
+X_train = torch.hstack(
+    (
+        config_emb(train_config_arr[train_indices[:, 0]]),
+        input_emb(train_input_arr[train_indices[:, 1]]),
+    )
+)
+regr_loss = F.mse_loss(perf_predict(X_train), y_train)
 # %%
