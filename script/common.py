@@ -389,11 +389,7 @@ def top_k_closest_cosine(emb1, emb2, k):
 # - The input/config representation must be floating point torch tensor.
 # - `rank_arr` and `regret_arr` must be (I, C) tensors mapping the input idx x config idx to the performance measure
 
-# TODO Make functions for rank_arr and regret_arr or let them work on the dataframes directly
 # TODO Allow multiple performance measures
-# TODO Move evaluation functions to separate file once they are stable
-
-# rank_map -> IxCxP matrix
 
 
 def evaluate_ic(
@@ -421,9 +417,7 @@ def evaluate_ic(
         top_cfg = top_k_closest_cosine(input_representation, config_representation, k=k)
 
     # Ranks
-    cfg_ranks = (
-        (torch.gather(rank_arr, 1, top_cfg).float() - 1) / rank_arr.shape[1] * 100
-    )
+    cfg_ranks = (torch.gather(rank_arr, 1, top_cfg).float()) / rank_arr.shape[1] * 100
     best_rank = cfg_ranks.min(axis=1)[0].mean()
     avg_rank = cfg_ranks.mean(axis=1).mean()
 
@@ -547,7 +541,6 @@ def evaluate_ii(
                     [rank_arr[j, cfgs].min() for j, cfgs in enumerate(reduced_top_r)],
                     dtype=torch.float,
                 ).mean()
-                - 1
             )
             / rank_arr.shape[1]
             * 100
@@ -637,7 +630,6 @@ def evaluate_cc(
                     [rank_arr[inps, j].min() for j, inps in enumerate(reduced_top_r)],
                     dtype=torch.float,
                 ).mean()
-                - 1
             )
             / rank_arr.shape[0]
             * 100

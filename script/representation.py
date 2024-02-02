@@ -496,7 +496,7 @@ def evaluate_cv(
         )
 
         rank_map = input_config_map.groupby("inputname").transform(
-            lambda x: stats.rankdata(x, method="min")
+            lambda x: stats.rankdata(x, method="min") - 1
         )
 
         # Prepare and select training/test data according to random split
