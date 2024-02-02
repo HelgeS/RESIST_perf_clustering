@@ -338,13 +338,15 @@ def train_model(
         .pivot_table(index="inputname", columns="configurationID", values=performance)
         .values
     ).to(device)
+    rank_arr = rank_arr / rank_arr.max(dim=1, keepdim=True).values
     regret_arr = torch.from_numpy(
         error_regret.loc[(train_inp, train_cfg), :]
         .reset_index()
         .pivot_table(index="inputname", columns="configurationID", values=performance)
         .values
     ).to(device)
-    rank_arr_cfg = regret_arr.T.argsort(dim=1)
+    rank_arr_cfg = regret_arr.T.argsort(dim=1).float()
+    rank_arr_cfg = rank_arr_cfg / rank_arr_cfg.max(dim=1, keepdim=True).values
 
     train_input_arr = train_input_arr.to(device)
     train_config_arr = train_config_arr.to(device)
