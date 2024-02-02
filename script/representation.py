@@ -535,8 +535,12 @@ def evaluate_cv(
             # Therefore we fit on the whole dataset, which is not direcly comparable
             # Also, we should consider different initializations to find the best embedding with TSNE
             # See: https://scikit-learn.org/stable/modules/manifold.html#t-sne
-            input_emb = TSNE(dimensions)
-            config_emb = TSNE(dimensions)
+
+            # We set the perplexity to be smaller than the number of samples
+            # or the default value
+            # TODO This should be optimized per dataset, ideally automatically
+            input_emb = TSNE(dimensions, perplexity=min(30, input_arr.shape[0] - 1))
+            config_emb = TSNE(dimensions, perplexity=min(30, config_arr.shape[0] - 1))
 
             input_embeddings = input_emb.fit_transform(input_arr)
             config_embeddings = config_emb.fit_transform(config_arr)
