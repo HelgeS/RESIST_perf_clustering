@@ -255,6 +255,10 @@ class ListNetLoss(nn.Module):
         return -torch.sum(true_probs * torch.log(pred_probs + 1e-10), dim=1).mean()
 
 
+def predict(model, x):
+    return F.normalize(model(x), p=2, dim=1)
+
+
 def train_model(
     train_inp,
     train_cfg,
@@ -308,7 +312,7 @@ def train_model(
     best_loss_iter = 0
     best_logmsg = None
     best_models = (copy.deepcopy(input_emb), copy.deepcopy(config_emb))
-    patience = 200
+    patience = 1000
 
     # TODO For our dataset size it is relatively cheap to calculate the embeddings for all inputs and configs.
     # We can every few iterations update a full collection and collect the hardest triplets from it.
@@ -343,57 +347,82 @@ def train_model(
     total_loss = 0
 
     for iteration in range(epochs):
-        batch, input_indices, config_indices = make_batch(
-            train_inp,
-            train_cfg,
-            batch_size,
-            input_map=input_map,
-            config_map=config_map,
-            rank_map=rank_map,
-        )
-        batch = batch.reshape((-1, 2)).to(device)
-        input_indices = input_indices.to(device)
-        config_indices = config_indices.to(device)
-        input_row = batch[:, 0] == 1
-        assert (
-            batch.shape[1] == 2
-        ), "Make sure to reshape batch to two columns (type, index)"
-
         optimizer.zero_grad()
-        embeddings = torch.empty((batch.shape[0], emb_size), device=device)
-        embeddings[input_row] = input_emb(train_input_arr[batch[input_row, 1]])
-        embeddings[~input_row] = config_emb(train_config_arr[batch[~input_row, 1]])
 
-        embeddings = F.normalize(embeddings, dim=1)
+        # batch, input_indices, config_indices = make_batch(
+        #     train_inp,
+        #     train_cfg,
+        #     batch_size,
+        #     input_map=input_map,
+        #     config_map=config_map,
+        #     rank_map=rank_map,
+        # )
+        # batch = batch.reshape((-1, 2)).to(device)
+        # input_indices = input_indices.to(device)
+        # config_indices = config_indices.to(device)
+        # input_row = batch[:, 0] == 1
+        # assert (
+        #     batch.shape[1] == 2
+        # ), "Make sure to reshape batch to two columns (type, index)"
 
-        loss = nn.functional.triplet_margin_loss(
-            anchor=embeddings[0::3],
-            positive=embeddings[1::3],
-            negative=embeddings[2::3],
+        # embeddings = torch.empty((batch.shape[0], emb_size), device=device)
+        # embeddings[input_row] = input_emb(train_input_arr[batch[input_row, 1]])
+        # embeddings[~input_row] = config_emb(train_config_arr[batch[~input_row, 1]])
+
+        # embeddings = F.normalize(embeddings, dim=1)
+
+        # loss = nn.functional.triplet_margin_loss(
+        #     anchor=embeddings[0::3],
+        #     positive=embeddings[1::3],
+        #     negative=embeddings[2::3],
+        # )
+
+        # # TODO Add alternative ranking losses that prioritize top ranks
+        # # TODO Make lnloss weight a parameter + hpsearch
+        # distmat = torch.cdist(embeddings[input_row], embeddings[~input_row])
+        # loss += 0.05 * lnloss(
+        #     torch.argsort(distmat, dim=1).float(),
+        #     rank_arr[input_indices, :][:, config_indices].float(),
+        # )
+        # loss += 0.05 * lnloss(
+        #     torch.argsort(distmat.T, dim=1).float(),
+        #     rank_arr_cfg[config_indices, :][:, input_indices].float(),
+        # )
+
+        ## Here we take some inputs + configs and apply listnet ranking loss
+        input_indices = torch.randint(train_input_arr.shape[0], size=(16,), device=device)
+        config_indices = torch.randint(train_config_arr.shape[0], size=(16,), device=device)
+
+        input_embeddings = predict(input_emb, train_input_arr[input_indices])
+        config_embeddings = predict(config_emb, train_config_arr[config_indices])
+
+        distmat = torch.cdist(input_embeddings, config_embeddings)
+        loss = lnloss(
+            distmat,
+            rank_arr[input_indices, :][:, config_indices],
+        )
+        loss += lnloss(
+            distmat.T,
+            rank_arr_cfg[config_indices, :][:, input_indices],
         )
 
-        # TODO Add alternative ranking losses that prioritize top ranks
-        # TODO Make lnloss weight a parameter + hpsearch
-        distmat = torch.cdist(embeddings[input_row], embeddings[~input_row])
-        loss += 0.05 * lnloss(
-            torch.argsort(distmat, dim=1).float(),
-            rank_arr[input_indices, :][:, config_indices].float(),
-        )
-        loss += 0.05 * lnloss(
-            torch.argsort(distmat.T, dim=1).float(),
-            rank_arr_cfg[config_indices, :][:, input_indices].float(),
-        )
+        # TODO Should we adjust the list ranking loss to consider min distances?
+        # This could be part of the distance matrix, 
+        # i.e. something like the cumsum to enforce min distances between items
+
+        ## Here we take the distance matrix and sample easy positive/hard negative
+        # Rank mismatch
 
         loss.backward()
         optimizer.step()
         total_loss += loss.cpu().item()
 
-        if iteration > 0 and iteration % 10 == 0:
+        if iteration > 0 and iteration % 50 == 0:
             total_loss /= 10
             scheduler.step(total_loss)
 
             with torch.no_grad():
-                inputembs = input_emb(train_input_arr)
+                inputembs = predict(input_emb, train_input_arr)
 
                 if inputembs.std(axis=0).mean() < 0.05:
                     print("Input embeddings collapsed")
@@ -720,9 +749,9 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", default="../results/")
 
     # args = parser.parse_args(["poppler", "size", "-m=pca", "-d=3", "--data-dir", "data/", "--epochs=20"])
-    # args = parser.parse_args(
-    #     ["xz", "size", "-m=embed", "-d=3", "--data-dir", "data/", "--epochs=20"]
-    # )
+    #args = parser.parse_args(
+    #   ["poppler", "size", "-m=embed", "-d=8", "--data-dir", "data/", "--epochs=10000"]
+    #)
     args = parser.parse_args()
 
     main(
