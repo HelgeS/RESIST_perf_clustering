@@ -247,17 +247,6 @@ class ListNetLoss(nn.Module):
         pred_scores: Tensor of predicted scores (batch_size x list_size)
         true_scores: Tensor of ground truth scores (batch_size x list_size)
         """
-
-        true_nan = torch.isnan(true_scores)
-        true_scores[true_nan] = float("-inf")
-        pred_scores[true_nan] = float("-inf")
-
-        if true_scores.max() > 1:
-            true_scores = true_scores / true_scores.max()
-
-        if pred_scores.max() > 1:
-            pred_scores = pred_scores / pred_scores.max()
-
         # Convert scores to probabilities
         pred_probs = F.softmax(pred_scores, dim=1)
         true_probs = F.softmax(true_scores, dim=1)
