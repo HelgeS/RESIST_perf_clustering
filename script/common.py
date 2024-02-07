@@ -395,7 +395,6 @@ def top_k_closest_cosine(emb1, emb2, k):
 def evaluate_ic(
     input_representation,
     config_representation,
-    rank_arr,
     regret_arr,
     k,
     distance="euclidean",
@@ -417,7 +416,7 @@ def evaluate_ic(
         top_cfg = top_k_closest_cosine(input_representation, config_representation, k=k)
 
     # Ranks
-    cfg_ranks = (torch.gather(rank_arr, 1, top_cfg).float()) / rank_arr.shape[1] * 100
+    cfg_ranks = (torch.gather(regret_arr.argsort(dim=-1), 1, top_cfg).float()) / regret_arr.shape[1] * 100
     best_rank = cfg_ranks.min(axis=1)[0].mean()
     avg_rank = cfg_ranks.mean(axis=1).mean()
 

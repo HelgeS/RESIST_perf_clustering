@@ -17,7 +17,6 @@ from common import (
     make_latex_tables,
     split_data_cv,
 )
-from scipy import stats
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from torch import nn
@@ -330,10 +329,10 @@ def train_model(
         .pivot_table(index="inputname", columns="configurationID", values=performance)
         .values
     ).to(device)
-    
+
     inp_rank_arr = regret_arr.argsort(dim=-1).float()
     inp_rank_arr = inp_rank_arr / inp_rank_arr.max(dim=-1, keepdim=True).values
-    
+
     cfg_rank_arr = regret_arr.T.argsort(dim=-1).float()
     cfg_rank_arr = cfg_rank_arr / cfg_rank_arr.max(dim=-1, keepdim=True).values
 
@@ -386,8 +385,12 @@ def train_model(
         # )
 
         ## Here we take some inputs + configs and apply listnet ranking loss
-        input_indices = torch.randint(train_input_arr.shape[0], size=(16,), device=device)
-        config_indices = torch.randint(train_config_arr.shape[0], size=(16,), device=device)
+        input_indices = torch.randint(
+            train_input_arr.shape[0], size=(16,), device=device
+        )
+        config_indices = torch.randint(
+            train_config_arr.shape[0], size=(16,), device=device
+        )
 
         input_embeddings = predict(input_emb, train_input_arr[input_indices])
         config_embeddings = predict(config_emb, train_config_arr[config_indices])
@@ -403,7 +406,7 @@ def train_model(
         )
 
         # TODO Should we adjust the list ranking loss to consider min distances?
-        # This could be part of the distance matrix, 
+        # This could be part of the distance matrix,
         # i.e. something like the cumsum to enforce min distances between items
 
         ## Here we take the distance matrix and sample easy positive/hard negative
@@ -430,16 +433,14 @@ def train_model(
                     icc_best_regret,
                     icc_avg_regret,
                 ) = evaluate_ic(
-                    inputembs,
-                    config_emb(train_config_arr),
-                    inp_rank_arr,
-                    regret_arr,
+                    input_representation=inputembs,
+                    config_representation=config_emb(train_config_arr),
+                    regret_arr=regret_arr,
                     k=5,
                 )
                 iii_ranks, iii_regret, _ = evaluate_ii(
-                    inputembs,
-                    inp_rank_arr,
-                    regret_arr,
+                    input_representation=inputembs,
+                    regret_arr=regret_arr,
                     n_neighbors=5,
                     n_recs=[1, 3, 5, 15, 25],
                 )
@@ -620,14 +621,11 @@ def evaluate_cv(
         print(f"MAPE:{train_mape:.3f} / {test_mape:.3f}")
         mape.append((train_mape, test_mape))
 
-        input_config_map_all = (
+        regret_arr_all = torch.from_numpy(
             perf_matrix[["inputname", "configurationID"] + performances]
             .sort_values(["inputname", "configurationID"])
             .set_index(["inputname", "configurationID"])
-        )
-
-        regret_arr_all = torch.from_numpy(
-            input_config_map_all.groupby("inputname", as_index=False)
+            .groupby("inputname", as_index=False)
             .transform(lambda x: ((x - x.min()) / (x.max() - x.min())))
             .pivot_table(
                 index="inputname", columns="configurationID", values=performances[0]
@@ -735,9 +733,9 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", default="../results/")
 
     # args = parser.parse_args(["poppler", "size", "-m=pca", "-d=3", "--data-dir", "data/", "--epochs=20"])
-    #args = parser.parse_args(
+    # args = parser.parse_args(
     #   ["poppler", "size", "-m=embed", "-d=8", "--data-dir", "data/", "--epochs=10000"]
-    #)
+    # )
     args = parser.parse_args()
 
     main(
