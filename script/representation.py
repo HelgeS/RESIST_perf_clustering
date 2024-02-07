@@ -515,9 +515,14 @@ def evaluate_cv(
             lambda x: (x - x.min()) / (x.max() - x.min())
         )
 
+        # here we rank the configurations per input
         rank_map = input_config_map.groupby("inputname").transform(
             lambda x: stats.rankdata(x, method="min") - 1
         )
+
+        # TODO: here we rank the inputs per configuration
+        # To make the input performances comparable, we must normalize them
+        # or use the regret? or use the previously calculated ranks?
 
         # Prepare and select training/test data according to random split
         train_input_mask = input_features.index.isin(train_inp)
