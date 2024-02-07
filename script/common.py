@@ -474,7 +474,6 @@ def ensure_tensor(x):
 
 def evaluate_ii(
     input_representation,
-    rank_arr,
     regret_arr,
     n_neighbors,
     n_recs=[1, 3, 5],
@@ -499,12 +498,12 @@ def evaluate_ii(
     )
 
     # Foreach close input
-    max_r = np.minimum(np.max(n_recs), rank_arr.shape[1])
+    max_r = np.minimum(np.max(n_recs), regret_arr.shape[1])
     top_r_ranks_per_neighbor = []
     top_r_regret_per_neighbor = []
     for r in top_inp:
         top_r_ranks_per_neighbor.append(
-            torch.topk(rank_arr[r, :], k=max_r, dim=1, largest=False).indices
+            torch.topk(regret_arr[r, :], k=max_r, dim=1, largest=False).indices
         )
         top_r_regret_per_neighbor.append(
             torch.topk(regret_arr[r, :], k=max_r, dim=1, largest=False).values
@@ -519,7 +518,7 @@ def evaluate_ii(
     n_queries = top_inp.shape[0]
 
     for i, r in enumerate(n_recs):
-        if r > rank_arr.shape[1]:
+        if r > regret_arr.shape[1]:
             # We can't ask for more neighbors than exist
             continue
 
@@ -538,11 +537,14 @@ def evaluate_ii(
         best_rank[i] = (
             (
                 torch.tensor(
-                    [rank_arr[j, cfgs].min() for j, cfgs in enumerate(reduced_top_r)],
+                    [
+                        regret_arr.argsort(dim=-1)[j, cfgs].min()
+                        for j, cfgs in enumerate(reduced_top_r)
+                    ],
                     dtype=torch.float,
                 ).mean()
             )
-            / rank_arr.shape[1]
+            / regret_arr.shape[1]
             * 100
         )
 
@@ -561,7 +563,6 @@ def evaluate_ii(
 # TODO There is no reason this uses torch, it should be numpy
 def evaluate_cc(
     config_representation,
-    rank_arr,
     regret_arr,
     n_neighbors,
     n_recs=[1, 3, 5],
@@ -588,12 +589,12 @@ def evaluate_cc(
     )
 
     # Foreach close config
-    max_r = np.minimum(np.max(n_recs), rank_arr.shape[1])
+    max_r = np.minimum(np.max(n_recs), regret_arr.shape[1])
     top_r_ranks_per_neighbor = []
     top_r_regret_per_neighbor = []
     for neighbors in top_cfg:
         top_r_ranks_per_neighbor.append(
-            torch.topk(rank_arr[:, neighbors], k=max_r, dim=0, largest=False).indices
+            torch.topk(regret_arr[:, neighbors], k=max_r, dim=0, largest=False).indices
         )
         top_r_regret_per_neighbor.append(
             torch.topk(regret_arr[:, neighbors], k=max_r, dim=0, largest=False).values
@@ -608,7 +609,7 @@ def evaluate_cc(
     n_queries = top_cfg.shape[0]
 
     for i, r in enumerate(n_recs):
-        if r > rank_arr.shape[1]:
+        if r > regret_arr.shape[1]:
             # We can't ask for more neighbors than exist
             continue
 
@@ -627,11 +628,14 @@ def evaluate_cc(
         best_rank[i] = (
             (
                 torch.tensor(
-                    [rank_arr[inps, j].min() for j, inps in enumerate(reduced_top_r)],
+                    [
+                        regret_arr.argsort(dim=-1)[inps, j].min()
+                        for j, inps in enumerate(reduced_top_r)
+                    ],
                     dtype=torch.float,
                 ).mean()
             )
-            / rank_arr.shape[0]
+            / regret_arr.shape[0]
             * 100
         )
 
@@ -805,7 +809,6 @@ def make_latex_tables(full_df, result_dir, verbose=True):
 def evaluate_retrieval(
     topk_values,
     topr_values,
-    rank_arr,
     regret_arr,
     train_input_mask,
     test_input_mask,
@@ -840,7 +843,6 @@ def evaluate_retrieval(
 
         train_cc = evaluate_cc(
             config_embeddings,
-            rank_arr=rank_arr,
             regret_arr=regret_arr,
             n_neighbors=topk,
             n_recs=topr_values,
@@ -853,7 +855,6 @@ def evaluate_retrieval(
 
         test_cc = evaluate_cc(
             config_embeddings,
-            rank_arr=rank_arr,
             regret_arr=regret_arr,
             n_neighbors=topk,
             n_recs=topr_values,
@@ -866,7 +867,6 @@ def evaluate_retrieval(
 
         train_ii = evaluate_ii(
             input_embeddings,
-            rank_arr=rank_arr,
             regret_arr=regret_arr,
             n_neighbors=topk,
             n_recs=topr_values,
@@ -879,7 +879,6 @@ def evaluate_retrieval(
 
         test_ii = evaluate_ii(
             input_embeddings,
-            rank_arr=rank_arr,
             regret_arr=regret_arr,
             n_neighbors=topk,
             n_recs=topr_values,

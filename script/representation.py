@@ -264,7 +264,6 @@ def train_model(
     train_cfg,
     train_input_arr,
     train_config_arr,
-    rank_map,
     error_regret,
     performance,
     emb_size,
@@ -325,21 +324,18 @@ def train_model(
     #     emb_lookup[train_input_arr.shape[0] :] = config_emb(train_config_arr)
 
     # For evaluation
-    rank_arr = torch.from_numpy(
-        rank_map.loc[(train_inp, train_cfg), :]
-        .reset_index()
-        .pivot_table(index="inputname", columns="configurationID", values=performance)
-        .values
-    ).to(device)
-    rank_arr = rank_arr / rank_arr.max(dim=1, keepdim=True).values
     regret_arr = torch.from_numpy(
         error_regret.loc[(train_inp, train_cfg), :]
         .reset_index()
         .pivot_table(index="inputname", columns="configurationID", values=performance)
         .values
     ).to(device)
-    rank_arr_cfg = regret_arr.T.argsort(dim=1).float()
-    rank_arr_cfg = rank_arr_cfg / rank_arr_cfg.max(dim=1, keepdim=True).values
+    
+    inp_rank_arr = regret_arr.argsort(dim=-1).float()
+    inp_rank_arr = inp_rank_arr / inp_rank_arr.max(dim=-1, keepdim=True).values
+    
+    cfg_rank_arr = regret_arr.T.argsort(dim=-1).float()
+    cfg_rank_arr = cfg_rank_arr / cfg_rank_arr.max(dim=-1, keepdim=True).values
 
     train_input_arr = train_input_arr.to(device)
     train_config_arr = train_config_arr.to(device)
@@ -399,11 +395,11 @@ def train_model(
         distmat = torch.cdist(input_embeddings, config_embeddings)
         loss = lnloss(
             distmat,
-            rank_arr[input_indices, :][:, config_indices],
+            inp_rank_arr[input_indices, :][:, config_indices],
         )
         loss += lnloss(
             distmat.T,
-            rank_arr_cfg[config_indices, :][:, input_indices],
+            cfg_rank_arr[config_indices, :][:, input_indices],
         )
 
         # TODO Should we adjust the list ranking loss to consider min distances?
@@ -436,13 +432,13 @@ def train_model(
                 ) = evaluate_ic(
                     inputembs,
                     config_emb(train_config_arr),
-                    rank_arr,
+                    inp_rank_arr,
                     regret_arr,
                     k=5,
                 )
                 iii_ranks, iii_regret, _ = evaluate_ii(
                     inputembs,
-                    rank_arr,
+                    inp_rank_arr,
                     regret_arr,
                     n_neighbors=5,
                     n_recs=[1, 3, 5, 15, 25],
@@ -515,11 +511,6 @@ def evaluate_cv(
             lambda x: (x - x.min()) / (x.max() - x.min())
         )
 
-        # here we rank the configurations per input
-        rank_map = input_config_map.groupby("inputname").transform(
-            lambda x: stats.rankdata(x, method="min") - 1
-        )
-
         # TODO: here we rank the inputs per configuration
         # To make the input performances comparable, we must normalize them
         # or use the regret? or use the previously calculated ranks?
@@ -550,7 +541,6 @@ def evaluate_cv(
                 train_cfg=train_cfg,
                 train_input_arr=train_input_arr,
                 train_config_arr=train_config_arr,
-                rank_map=rank_map,
                 error_regret=regret_map,
                 emb_size=dimensions,
                 epochs=epochs,
@@ -636,14 +626,6 @@ def evaluate_cv(
             .set_index(["inputname", "configurationID"])
         )
 
-        rank_arr_all = torch.from_numpy(
-            input_config_map_all.groupby("inputname", as_index=False)
-            .transform(lambda x: stats.rankdata(x, method="min"))
-            .pivot_table(
-                index="inputname", columns="configurationID", values=performances[0]
-            )
-            .values
-        )
         regret_arr_all = torch.from_numpy(
             input_config_map_all.groupby("inputname", as_index=False)
             .transform(lambda x: ((x - x.min()) / (x.max() - x.min())))
@@ -657,7 +639,6 @@ def evaluate_cv(
         result_df = evaluate_retrieval(
             topk_values=topk_values,
             topr_values=topr_values,
-            rank_arr=rank_arr_all,
             regret_arr=regret_arr_all,
             train_input_mask=train_input_mask,
             test_input_mask=test_input_mask,

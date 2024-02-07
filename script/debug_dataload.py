@@ -91,11 +91,16 @@ input_config_map = (
     .set_index(["inputname", "configurationID"])
 )
 
+rank_map = input_config_map.groupby("inputname").transform(
+    lambda x: stats.rankdata(x, method="min")
+)
+
 regret_map = input_config_map.groupby("inputname").transform(
     lambda x: ((x - x.min()) / (x.max() - x.min()))  # .fillna(0)
 )
 
-rank_map = input_config_map.groupby("inputname").transform(
+# We create the rank of inputs for a configuration by ranking their (input-internal) regret
+cfg_rank_map = regret_map.groupby("configurationID").transform(
     lambda x: stats.rankdata(x, method="min")
 )
 
