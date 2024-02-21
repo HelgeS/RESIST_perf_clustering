@@ -14,6 +14,7 @@ from common import (
     evaluate_ii,
     load_data,
     make_latex_tables,
+    spearman_rank_distance,
     split_data,
     split_data_cv,
     evaluate_prediction,
@@ -261,6 +262,23 @@ loss += 0.05 * lnloss(
 # a) with one performance measure
 # b) with multiple performance measures
 # Correlation metrics: spearman, kendalltau, rank_difference
+
+# input-input: 
+
+measurements = input_config_map.values.reshape(
+    (len(data_split["train_inp"]), len(data_split["train_cfg"]), 1)
+)
+
+
+# TODO If we have more than one performance metric, 
+# we can calculate the level in the pareto front as a rank
+# This reduces to simply ranking in the case of one performance metric (nice!)
+ic_dist_mat = stats.rankdata(measurements, axis=1)
+ci_dist_mat = stats.rankdata(measurements, axis=0).swapaxes(0, 1)
+
+# spearman rank distance
+ii_dist_mat = spearman_rank_distance(measurements)
+cc_dist_mat = spearman_rank_distance(measurements.swapaxes(0,1))
 
 # q: cfg, r: cfg
 # TODO rank correlation
