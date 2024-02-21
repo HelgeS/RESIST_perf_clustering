@@ -322,7 +322,6 @@ def train_model(
     #     emb_lookup[: train_input_arr.shape[0]] = input_emb(train_input_arr)
     #     emb_lookup[train_input_arr.shape[0] :] = config_emb(train_config_arr)
 
-    # For evaluation
     regret_arr = torch.from_numpy(
         error_regret.loc[(train_inp, train_cfg), :]
         .reset_index()
@@ -330,11 +329,15 @@ def train_model(
         .values
     ).to(device)
 
-    inp_rank_arr = regret_arr.argsort(dim=-1).float()
-    inp_rank_arr = inp_rank_arr / inp_rank_arr.max(dim=-1, keepdim=True).values
+    inp_cfg_ranks = regret_arr.argsort(dim=-1).float()
+    inp_cfg_ranks = inp_cfg_ranks / inp_cfg_ranks.max(dim=-1, keepdim=True).values
 
-    cfg_rank_arr = regret_arr.T.argsort(dim=-1).float()
-    cfg_rank_arr = cfg_rank_arr / cfg_rank_arr.max(dim=-1, keepdim=True).values
+    cfg_inp_ranks = regret_arr.T.argsort(dim=-1).float()
+    cfg_inp_ranks = cfg_inp_ranks / cfg_inp_ranks.max(dim=-1, keepdim=True).values
+
+    # TODO
+    # inp_inp_ranks = common.spearman_rank_distance(train)
+    # cfg_cfg_ranks = ...
 
     train_input_arr = train_input_arr.to(device)
     train_config_arr = train_config_arr.to(device)
@@ -398,11 +401,11 @@ def train_model(
         distmat = torch.cdist(input_embeddings, config_embeddings)
         loss = lnloss(
             distmat,
-            inp_rank_arr[input_indices, :][:, config_indices],
+            inp_cfg_ranks[input_indices, :][:, config_indices],
         )
         loss += lnloss(
             distmat.T,
-            cfg_rank_arr[config_indices, :][:, input_indices],
+            cfg_inp_ranks[config_indices, :][:, input_indices],
         )
 
         # TODO Should we adjust the list ranking loss to consider min distances?
