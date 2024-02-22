@@ -327,15 +327,15 @@ def get_icrt_cirt(regret_map_all):
         .values
     ).to(device)
     test_inp_cfg_ranks = regret_arr_all.argsort(dim=-1).float()
-    test_inp_cfg_ranks = (
-        test_inp_cfg_ranks / test_inp_cfg_ranks.max(dim=-1, keepdim=True).values
-    )
+    # test_inp_cfg_ranks = (
+    #     test_inp_cfg_ranks / test_inp_cfg_ranks.max(dim=-1, keepdim=True).values
+    # )
     icrt = stats.rankdata(test_inp_cfg_ranks.numpy(), method="max", axis=-1)
 
     test_cfg_inp_ranks = regret_arr_all.T.argsort(dim=-1).float()
-    test_cfg_inp_ranks = (
-        test_cfg_inp_ranks / test_cfg_inp_ranks.max(dim=-1, keepdim=True).values
-    )
+    # test_cfg_inp_ranks = (
+    #     test_cfg_inp_ranks / test_cfg_inp_ranks.max(dim=-1, keepdim=True).values
+    # )
     cirt = stats.rankdata(test_cfg_inp_ranks.numpy(), method="max", axis=-1)
     return icrt, cirt
 
@@ -368,16 +368,16 @@ for iteration in range(10_000):
     loss = 0
     
     
-    # distmat_inp = torch.cdist(inp_emb, inp_emb)
-    # loss = lnloss(
-    #     distmat_inp,
-    #     inp_inp_ranks_tensor,
-    # )
-    # distmat_cfg = torch.cdist(cfg_emb, cfg_emb)
-    # loss += lnloss(
-    #     distmat_cfg,
-    #     cfg_cfg_ranks_tensor,
-    # )
+    distmat_inp = torch.cdist(inp_emb, inp_emb)
+    loss += lnloss(
+        distmat_inp,
+        inp_inp_ranks_tensor,
+    )
+    distmat_cfg = torch.cdist(cfg_emb, cfg_emb)
+    loss += lnloss(
+        distmat_cfg,
+        cfg_cfg_ranks_tensor,
+    )
 
     distmat = torch.cdist(inp_emb, cfg_emb)
     loss += lnloss(
