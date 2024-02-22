@@ -11,7 +11,7 @@ from sklearn.neighbors import NearestNeighbors
 from common import (
     split_data,
     load_data,
-    spearman_rank_distance,
+    pearson_rank_distance_matrix,
     pearson_correlation,
     rank_difference_distance,
     wilcoxon_distance,

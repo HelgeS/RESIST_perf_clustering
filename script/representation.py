@@ -16,6 +16,7 @@ from common import (
     load_data,
     make_latex_tables,
     split_data_cv,
+    pearson_rank_distance_matrix,
 )
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
@@ -251,11 +252,74 @@ class ListNetLoss(nn.Module):
         true_probs = F.softmax(true_scores, dim=1)
 
         # Compute cross-entropy loss
-        return -torch.sum(true_probs * torch.log(pred_probs + 1e-10), dim=1).mean()
+        return torch.mean(-torch.sum(true_probs * torch.log(pred_probs + 1e-10), dim=1))
+
+
+# https://github.com/allegro/allRank/blob/master/allrank/models/losses/rankNet.py
+def rankNet(
+    y_pred,
+    y_true,
+    padded_value_indicator=-1,
+    weight_by_diff=False,
+    weight_by_diff_powed=False,
+):
+    """
+    RankNet loss introduced in "Learning to Rank using Gradient Descent".
+    :param y_pred: predictions from the model, shape [batch_size, slate_length]
+    :param y_true: ground truth labels, shape [batch_size, slate_length]
+    :param weight_by_diff: flag indicating whether to weight the score differences by ground truth differences.
+    :param weight_by_diff_powed: flag indicating whether to weight the score differences by the squared ground truth differences.
+    :return: loss value, a torch.Tensor
+    """
+    y_pred = y_pred.clone()
+    y_true = y_true.clone()
+
+    # mask = y_true == padded_value_indicator
+    # y_pred[mask] = float("-inf")
+    # y_true[mask] = float("-inf")
+
+    # here we generate every pair of indices from the range of document length in the batch
+    document_pairs_candidates = list(
+        itertools.product(range(y_true.shape[1]), repeat=2)
+    )
+
+    pairs_true = y_true[:, document_pairs_candidates]
+    selected_pred = y_pred[:, document_pairs_candidates]
+
+    # here we calculate the relative true relevance of every candidate pair
+    true_diffs = pairs_true[:, :, 0] - pairs_true[:, :, 1]
+    pred_diffs = selected_pred[:, :, 0] - selected_pred[:, :, 1]
+
+    # here we filter just the pairs that are 'positive' and did not involve a padded instance
+    # we can do that since in the candidate pairs we had symetric pairs so we can stick with
+    # positive ones for a simpler loss function formulation
+    the_mask = (true_diffs > 0) & (~torch.isinf(true_diffs))
+
+    pred_diffs = pred_diffs[the_mask]
+
+    weight = None
+    if weight_by_diff:
+        abs_diff = torch.abs(true_diffs)
+        weight = abs_diff[the_mask]
+    elif weight_by_diff_powed:
+        true_pow_diffs = torch.pow(pairs_true[:, :, 0], 2) - torch.pow(
+            pairs_true[:, :, 1], 2
+        )
+        abs_diff = torch.abs(true_pow_diffs)
+        weight = abs_diff[the_mask]
+
+    # here we 'binarize' true relevancy diffs since for a pairwise loss we just need to know
+    # whether one document is better than the other and not about the actual difference in
+    # their relevancy levels
+    true_diffs = (true_diffs > 0).type(torch.float32)
+    true_diffs = true_diffs[the_mask]
+
+    return nn.BCEWithLogitsLoss(weight=weight)(pred_diffs, true_diffs)
 
 
 def predict(model, x):
-    return F.normalize(model(x), p=2, dim=1)
+    # return F.normalize(model(x), p=2, dim=1)
+    return model(x)
 
 
 def train_model(
@@ -297,12 +361,13 @@ def train_model(
     # )
 
     optimizer = torch.optim.AdamW(
-        list(input_emb.parameters()) + list(config_emb.parameters()), lr=0.0003
+        list(input_emb.parameters()) + list(config_emb.parameters()), lr=0.00001
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, "min", verbose=True
     )
 
+    # lnloss = rankNet  # ListNetLoss()
     lnloss = ListNetLoss()
 
     # Early stopping
@@ -335,9 +400,32 @@ def train_model(
     cfg_inp_ranks = regret_arr.T.argsort(dim=-1).float()
     cfg_inp_ranks = cfg_inp_ranks / cfg_inp_ranks.max(dim=-1, keepdim=True).values
 
-    # TODO
-    # inp_inp_ranks = common.spearman_rank_distance(train)
-    # cfg_cfg_ranks = ...
+    inp_inp_ranks = torch.from_numpy(
+        pearson_rank_distance_matrix(
+            np.expand_dims(
+                error_regret.loc[(train_inp, train_cfg), :]
+                .reset_index()
+                .pivot_table(
+                    index="inputname", columns="configurationID", values=performance
+                )
+                .values,
+                axis=-1,
+            )
+        ).squeeze(-1)
+    ).to(device)
+    cfg_cfg_ranks = torch.from_numpy(
+        pearson_rank_distance_matrix(
+            np.expand_dims(
+                error_regret.loc[(train_inp, train_cfg), :]
+                .reset_index()
+                .pivot_table(
+                    index="configurationID", columns="inputname", values=performance
+                )
+                .values,
+                axis=-1,
+            )
+        ).squeeze(-1)
+    ).to(device)
 
     train_input_arr = train_input_arr.to(device)
     train_config_arr = train_config_arr.to(device)
@@ -389,24 +477,36 @@ def train_model(
 
         ## Here we take some inputs + configs and apply listnet ranking loss
         input_indices = torch.randint(
-            train_input_arr.shape[0], size=(16,), device=device
+            train_input_arr.shape[0], size=(8,), device=device
         )
         config_indices = torch.randint(
-            train_config_arr.shape[0], size=(16,), device=device
+            train_config_arr.shape[0], size=(8,), device=device
         )
 
         input_embeddings = predict(input_emb, train_input_arr[input_indices])
         config_embeddings = predict(config_emb, train_config_arr[config_indices])
 
-        distmat = torch.cdist(input_embeddings, config_embeddings)
-        loss = lnloss(
-            distmat,
-            inp_cfg_ranks[input_indices, :][:, config_indices],
-        )
+        # distmat = torch.cdist(input_embeddings, config_embeddings)
+        # loss = lnloss(
+        #     distmat,
+        #     inp_cfg_ranks[input_indices, :][:, config_indices],
+        # )
+        # loss += lnloss(
+        #     distmat.T,
+        #     cfg_inp_ranks[config_indices, :][:, input_indices],
+        # )
+        loss = 0
+        distmat_ii = torch.cdist(input_embeddings, input_embeddings)
         loss += lnloss(
-            distmat.T,
-            cfg_inp_ranks[config_indices, :][:, input_indices],
+            distmat_ii,
+            inp_inp_ranks[input_indices, :][:, input_indices],
         )
+
+        distmat_cc = torch.cdist(config_embeddings, config_embeddings)
+        # loss += lnloss(
+        #     distmat_cc,
+        #     cfg_cfg_ranks[config_indices, :][:, config_indices],
+        # )
 
         # TODO Should we adjust the list ranking loss to consider min distances?
         # This could be part of the distance matrix,
@@ -447,6 +547,17 @@ def train_model(
                     n_neighbors=5,
                     n_recs=[1, 3, 5, 15, 25],
                 )
+
+                cc_sort = torch.mean((
+                    distmat_cc.argsort(dim=-1)
+                    == cfg_cfg_ranks[config_indices, :][:, config_indices].argsort(dim=-1)
+                ).float())
+                ii_sort = torch.mean((
+                    distmat_ii.argsort(dim=-1)
+                    == inp_inp_ranks[input_indices, :][:, input_indices].argsort(dim=-1)
+                ).float())
+
+                print(cc_sort, ii_sort)
                 logmsg = (
                     f"{iteration} "
                     + f"l:{total_loss:.3f} | "
@@ -736,10 +847,10 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", default="../results/")
 
     # args = parser.parse_args(["poppler", "size", "-m=pca", "-d=3", "--data-dir", "data/", "--epochs=20"])
-    # args = parser.parse_args(
-    #   ["poppler", "size", "-m=embed", "-d=8", "--data-dir", "data/", "--epochs=10000"]
-    # )
-    args = parser.parse_args()
+    args = parser.parse_args(
+        ["poppler", "size", "-m=embed", "-d=8", "--data-dir", "data/", "--epochs=10000"]
+    )
+    # args = parser.parse_args()
 
     main(
         data_dir=args.data_dir,

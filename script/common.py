@@ -282,21 +282,21 @@ def pearson_correlation(X, Y):
     mean_X = np.mean(X, axis=-1, keepdims=True)
     mean_Y = np.mean(Y, axis=-1, keepdims=True)
     numerator = np.sum((X - mean_X) * (Y - mean_Y), axis=-1)
-    denominator = np.sqrt(
+    denominator = np.maximum(np.sqrt(
         np.sum((X - mean_X) ** 2, axis=-1) * np.sum((Y - mean_Y) ** 2, axis=-1)
-    )
+    ), 1e-6)
     return numerator / denominator
 
 
-def spearman_rank_distance(measurements):
-    # Vectorized spearmanr with multiple measurements
+def pearson_rank_distance_matrix(measurements):
+    # Vectorized spearson rank distance with multiple measurements
 
     # Breaks ties correctly by assigning same ranks, but potentially instable
     # TODO Should work correctly if we drop `frames` which has constant value
-    # ranks = stats.rankdata(measurements, axis=1, method="min")
+    ranks = stats.rankdata(measurements, axis=1, method="min")
 
     # Makes individual ranks
-    ranks = np.argsort(measurements, axis=1)
+    # ranks = np.argsort(measurements, axis=1)
 
     # The ranks array is 3D (A, B, C), and we need to expand it to 4D for pairwise comparison in A,
     # while keeping C
@@ -315,7 +315,7 @@ def spearman_rank_distance(measurements):
             expanded_rank_X_3d[:, :, :, c], expanded_rank_Y_3d[:, :, :, c]
         )
 
-    return spearman_correlation_matrix_3d
+    return 1-np.abs(spearman_correlation_matrix_3d)
 
 
 def rank_difference_distance(measurements):

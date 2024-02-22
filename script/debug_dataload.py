@@ -14,7 +14,7 @@ from common import (
     evaluate_ii,
     load_data,
     make_latex_tables,
-    spearman_rank_distance,
+    pearson_rank_distance_matrix,
     split_data,
     split_data_cv,
     evaluate_prediction,
@@ -122,6 +122,73 @@ config_arr = torch.from_numpy(config_preprocessor.transform(config_features)).fl
 train_input_arr = input_arr[train_input_mask]
 train_config_arr = config_arr[train_config_mask]
 
+test_input_arr = input_arr[test_input_mask]
+test_config_arr = config_arr[test_config_mask]
+
+# %%
+
+
+def rankNet(
+    y_pred,
+    y_true,
+    padded_value_indicator=-1,
+    weight_by_diff=False,
+    weight_by_diff_powed=False,
+):
+    """
+    RankNet loss introduced in "Learning to Rank using Gradient Descent".
+    :param y_pred: predictions from the model, shape [batch_size, slate_length]
+    :param y_true: ground truth labels, shape [batch_size, slate_length]
+    :param weight_by_diff: flag indicating whether to weight the score differences by ground truth differences.
+    :param weight_by_diff_powed: flag indicating whether to weight the score differences by the squared ground truth differences.
+    :return: loss value, a torch.Tensor
+    """
+    y_pred = y_pred.clone()
+    y_true = y_true.clone()
+
+    mask = y_true == padded_value_indicator
+    y_pred[mask] = float("-inf")
+    y_true[mask] = float("-inf")
+
+    # here we generate every pair of indices from the range of document length in the batch
+    document_pairs_candidates = list(
+        itertools.product(range(y_true.shape[1]), repeat=2)
+    )
+
+    pairs_true = y_true[:, document_pairs_candidates]
+    selected_pred = y_pred[:, document_pairs_candidates]
+
+    # here we calculate the relative true relevance of every candidate pair
+    true_diffs = pairs_true[:, :, 0] - pairs_true[:, :, 1]
+    pred_diffs = selected_pred[:, :, 0] - selected_pred[:, :, 1]
+
+    # here we filter just the pairs that are 'positive' and did not involve a padded instance
+    # we can do that since in the candidate pairs we had symetric pairs so we can stick with
+    # positive ones for a simpler loss function formulation
+    the_mask = (true_diffs > 0) & (~torch.isinf(true_diffs))
+
+    pred_diffs = pred_diffs[the_mask]
+
+    weight = None
+    if weight_by_diff:
+        abs_diff = torch.abs(true_diffs)
+        weight = abs_diff[the_mask]
+    elif weight_by_diff_powed:
+        true_pow_diffs = torch.pow(pairs_true[:, :, 0], 2) - torch.pow(
+            pairs_true[:, :, 1], 2
+        )
+        abs_diff = torch.abs(true_pow_diffs)
+        weight = abs_diff[the_mask]
+
+    # here we 'binarize' true relevancy diffs since for a pairwise loss we just need to know
+    # whether one document is better than the other and not about the actual difference in
+    # their relevancy levels
+    true_diffs = (true_diffs > 0).type(torch.float32)
+    true_diffs = true_diffs[the_mask]
+
+    return nn.BCEWithLogitsLoss(weight=weight)(pred_diffs, true_diffs)
+
+
 # %%
 
 emb_size = dimensions
@@ -133,32 +200,33 @@ batch_size = 1024
 
 device = "cpu"  # torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+dropout = 0.0
 input_emb = nn.Sequential(
     nn.Linear(num_input_features, 64),
-    nn.Dropout(),
+    nn.Dropout(p=dropout),
+    nn.ReLU(),
+    nn.Linear(64, 64),
+    nn.Dropout(p=dropout),
     nn.ReLU(),
     nn.Linear(64, emb_size),
 ).to(device)
 config_emb = nn.Sequential(
     nn.Linear(num_config_features, 64),
-    nn.Dropout(),
+    nn.Dropout(p=dropout),
+    nn.ReLU(),
+    nn.Linear(64, 64),
+    nn.Dropout(p=dropout),
     nn.ReLU(),
     nn.Linear(64, emb_size),
 ).to(device)
 
-# TODO Implement performance prediction from latent space
-# perf_predict = nn.Sequential(
-#     nn.Linear(2 * emb_size, 64),
-#     nn.ReLU(),
-#     nn.Linear(64, 1),  # TODO Check with |P| outputs
-# )
-
 optimizer = torch.optim.AdamW(
-    list(input_emb.parameters()) + list(config_emb.parameters()), lr=0.0003
+    list(input_emb.parameters()) + list(config_emb.parameters()), lr=0.0001
 )
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", verbose=True)
 
-lnloss = ListNetLoss()
+# lnloss = ListNetLoss()
+lnloss = rankNet
 
 # Early stopping
 best_loss = np.inf
@@ -185,74 +253,183 @@ train_config_arr = train_config_arr.to(device)
 
 total_loss = 0
 
-# %%
 
-with torch.no_grad():
-    emb_lookup = torch.empty(
-        (train_input_arr.shape[0] + train_config_arr.shape[0], emb_size)
+inp_cfg_ranks = regret_arr.argsort(dim=-1).float()
+# inp_cfg_ranks = inp_cfg_ranks / inp_cfg_ranks.max(dim=-1, keepdim=True).values
+icr = stats.rankdata(inp_cfg_ranks.numpy(), method="max", axis=-1)
+
+cfg_inp_ranks = regret_arr.T.argsort(dim=-1).float()
+# cfg_inp_ranks = cfg_inp_ranks / cfg_inp_ranks.max(dim=-1, keepdim=True).values
+cir = stats.rankdata(cfg_inp_ranks.numpy(), method="max", axis=-1)
+
+
+## Configuration - Configuration
+cfg_cfg_corr = pearson_rank_distance_matrix(
+    np.expand_dims(
+        regret_map.loc[(train_inp, train_cfg), :]
+        .reset_index()
+        .pivot_table(index="configurationID", columns="inputname", values=performance)
+        .values,
+        axis=-1,
     )
-    emb_lookup[: train_input_arr.shape[0]] = input_emb(train_input_arr)
-    emb_lookup[train_input_arr.shape[0] :] = config_emb(train_config_arr)
+).squeeze(-1)
+cfg_cfg_ranks = stats.rankdata(cfg_cfg_corr, method="max", axis=-1)
+# TODO Needs -1?
+cfg_cfg_ranks_tensor = torch.from_numpy(cfg_cfg_ranks - 1).float().to(device)
 
-
-# %%
-for iteration in range(3):
-    batch, input_indices, config_indices = make_batch(
-        train_inp,
-        train_cfg,
-        batch_size,
-        input_map=input_map,
-        config_map=config_map,
-        rank_map=rank_map,
+## Input - Input
+inp_inp_corr = pearson_rank_distance_matrix(
+    np.expand_dims(
+        regret_map.loc[(train_inp, train_cfg), :]
+        .reset_index()
+        .pivot_table(index="inputname", columns="configurationID", values=performance)
+        .values,
+        axis=-1,
     )
-    batch = batch.reshape((-1, 2)).to(device)
-    input_indices = input_indices.to(device)
-    config_indices = config_indices.to(device)
-    input_row = batch[:, 0] == 1
-    assert (
-        batch.shape[1] == 2
-    ), "Make sure to reshape batch to two columns (type, index)"
+).squeeze(-1)
+inp_inp_ranks = stats.rankdata(inp_inp_corr, method="max", axis=-1)
+# TODO Needs -1?
+inp_inp_ranks_tensor = torch.from_numpy(inp_inp_ranks - 1).float().to(device)
+
+
+### TEST DATA
+# TODO rankdata on test split or on full dataset?
+cfg_cfg_corr_t = pearson_rank_distance_matrix(
+    np.expand_dims(
+        regret_map_all.loc[(test_inp, test_cfg), :]
+        .reset_index()
+        .pivot_table(index="configurationID", columns="inputname", values=performance)
+        .values,
+        axis=-1,
+    )
+).squeeze(-1)
+
+# Yo this is not a rank, it's the pearson correlation
+inp_inp_corr_t = pearson_rank_distance_matrix(
+    np.expand_dims(
+        regret_map_all.loc[(test_inp, test_cfg), :]
+        .reset_index()
+        .pivot_table(index="inputname", columns="configurationID", values=performance)
+        .values,
+        axis=-1,
+    )
+).squeeze(-1)
+
+iirt = stats.rankdata(inp_inp_corr_t, method="max", axis=-1)
+ccrt = stats.rankdata(cfg_cfg_corr_t, method="max", axis=-1)
+
+
+def get_icrt_cirt(regret_map_all):
+    regret_arr_all = torch.from_numpy(
+        regret_map_all.loc[(test_inp, test_cfg), :]
+        .reset_index()
+        .pivot_table(index="inputname", columns="configurationID", values=performance)
+        .values
+    ).to(device)
+    test_inp_cfg_ranks = regret_arr_all.argsort(dim=-1).float()
+    test_inp_cfg_ranks = (
+        test_inp_cfg_ranks / test_inp_cfg_ranks.max(dim=-1, keepdim=True).values
+    )
+    icrt = stats.rankdata(test_inp_cfg_ranks.numpy(), method="max", axis=-1)
+
+    test_cfg_inp_ranks = regret_arr_all.T.argsort(dim=-1).float()
+    test_cfg_inp_ranks = (
+        test_cfg_inp_ranks / test_cfg_inp_ranks.max(dim=-1, keepdim=True).values
+    )
+    cirt = stats.rankdata(test_cfg_inp_ranks.numpy(), method="max", axis=-1)
+    return icrt, cirt
+
+
+icrt, cirt = get_icrt_cirt(regret_map_all)
+
+
+def eval(inp_emb, cfg_emb, iir, ccr, icr, cir):
+    correct_inp_inp = np.mean(
+        stats.rankdata(torch.cdist(inp_emb, inp_emb).numpy(), axis=-1) <= iir
+    )
+    correct_cfg_cfg = np.mean(
+        stats.rankdata(torch.cdist(cfg_emb, cfg_emb).numpy(), axis=-1) <= ccr
+    )
+    dist_ic = torch.cdist(inp_emb, cfg_emb).numpy()
+    correct_inp_cfg = np.mean(stats.rankdata(dist_ic, axis=-1) <= icr)
+    correct_cfg_inp = np.mean(stats.rankdata(dist_ic.T, axis=-1) <= cir)
+    return (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp)
+
+
+best_loss = 999
+best_correct = 0
+
+for iteration in range(10_000):
+    inp_emb = F.normalize(input_emb(train_input_arr))
+    cfg_emb = F.normalize(config_emb(train_config_arr))
 
     optimizer.zero_grad()
-    embeddings = torch.empty((batch.shape[0], emb_size), device=device)
-    embeddings[input_row] = input_emb(train_input_arr[batch[input_row, 1]])
-    embeddings[~input_row] = config_emb(train_config_arr[batch[~input_row, 1]])
-    loss = nn.functional.triplet_margin_loss(
-        anchor=embeddings[0::3],
-        positive=embeddings[1::3],
-        negative=embeddings[2::3],
+    
+    loss = 0
+    
+    
+    # distmat_inp = torch.cdist(inp_emb, inp_emb)
+    # loss = lnloss(
+    #     distmat_inp,
+    #     inp_inp_ranks_tensor,
+    # )
+    # distmat_cfg = torch.cdist(cfg_emb, cfg_emb)
+    # loss += lnloss(
+    #     distmat_cfg,
+    #     cfg_cfg_ranks_tensor,
+    # )
+
+    distmat = torch.cdist(inp_emb, cfg_emb)
+    loss += lnloss(
+        distmat,
+        inp_cfg_ranks,  # [input_indices, :][:, config_indices],
+    )
+    loss += lnloss(
+        distmat.T,
+        cfg_inp_ranks,  # [config_indices, :][:, input_indices],
     )
 
-    distmat = torch.cdist(embeddings[input_row], embeddings[~input_row])
-    loss += 0.05 * lnloss(
-        torch.argsort(distmat, dim=1).float(),
-        rank_arr[input_indices, :][:, config_indices].float(),
-    )
-    loss += 0.05 * lnloss(
-        torch.argsort(distmat.T, dim=1).float(),
-        rank_arr_cfg[config_indices, :][:, input_indices].float(),
-    )
+    if loss < best_loss:
+        best_loss = loss.detach().item()
+
+        with torch.no_grad():
+            (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp) = eval(
+                inp_emb, cfg_emb, inp_inp_ranks, cfg_cfg_ranks, icr, cir
+            )
+            avg_train = np.mean(
+                (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp)
+            )
+
+            inp_emb_test = F.normalize(input_emb(test_input_arr))
+            cfg_emb_test = F.normalize(config_emb(test_config_arr))
+            (
+                torrect_inp_inp,
+                tcorrect_cfg_cfg,
+                tcorrect_inp_cfg,
+                tcorrect_cfg_inp,
+            ) = eval(inp_emb_test, cfg_emb_test, iirt, ccrt, icrt, cirt)
+            avg_test = np.mean(
+                (
+                    torrect_inp_inp,
+                    tcorrect_cfg_cfg,
+                    tcorrect_inp_cfg,
+                    tcorrect_cfg_inp,
+                )
+            )
+
+        print(
+            f"{iteration}\t{loss.item():.3f} | {avg_train:.3f} | {correct_inp_inp:.3f} | {correct_cfg_cfg:.3f} | {correct_inp_cfg:.3f} | {correct_cfg_inp:.3f}"
+        )
+        print(
+            f"test\t\t{torrect_inp_inp:.3f} | {avg_test:.3f} | {tcorrect_cfg_cfg:.3f} | {tcorrect_inp_cfg:.3f} | {tcorrect_cfg_inp:.3f}"
+        )
+        if correct_inp_inp > 0.99 and correct_cfg_cfg > 0.99:
+            break
 
     loss.backward()
     optimizer.step()
-    total_loss += loss.cpu().item()
 
 # %%
-
-distmat = torch.cdist(embeddings[input_row], embeddings[~input_row])
-
-# q: inp, r: cfg
-# rankarr
-loss += 0.05 * lnloss(
-    torch.argsort(distmat, dim=1).float(),
-    rank_arr[input_indices, :][:, config_indices].float(),
-)
-
-# q: cfg, r: inp
-loss += 0.05 * lnloss(
-    torch.argsort(distmat.T, dim=1).float(),
-    rank_arr_cfg[config_indices, :][:, input_indices].float(),
-)
 
 # q: inp, r: inp
 # Two inputs should be closer if they are similarly affected by the same configurations
@@ -263,25 +440,23 @@ loss += 0.05 * lnloss(
 # b) with multiple performance measures
 # Correlation metrics: spearman, kendalltau, rank_difference
 
-# input-input: 
+# input-input:
 
 measurements = input_config_map.values.reshape(
     (len(data_split["train_inp"]), len(data_split["train_cfg"]), 1)
 )
 
 
-# TODO If we have more than one performance metric, 
+# TODO If we have more than one performance metric,
 # we can calculate the level in the pareto front as a rank
 # This reduces to simply ranking in the case of one performance metric (nice!)
 ic_dist_mat = stats.rankdata(measurements, axis=1)
 ci_dist_mat = stats.rankdata(measurements, axis=0).swapaxes(0, 1)
 
 # spearman rank distance
-ii_dist_mat = spearman_rank_distance(measurements)
-cc_dist_mat = spearman_rank_distance(measurements.swapaxes(0,1))
+ii_dist_mat = pearson_rank_distance_matrix(measurements)
+cc_dist_mat = pearson_rank_distance_matrix(measurements.swapaxes(0, 1))
 
-# q: cfg, r: cfg
-# TODO rank correlation
 
 # %%
 perf_predict = nn.Sequential(
