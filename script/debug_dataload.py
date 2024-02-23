@@ -191,76 +191,19 @@ def rankNet(
 
 # %%
 
-emb_size = dimensions
-num_input_features = train_input_arr.shape[1]
-num_config_features = train_config_arr.shape[1]
-input_map = {s: i for i, s in enumerate(train_inp)}
-config_map = {s: i for i, s in enumerate(train_cfg)}
-batch_size = 1024
-
 device = "cpu"  # torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-dropout = 0.0
-input_emb = nn.Sequential(
-    nn.Linear(num_input_features, 64),
-    nn.Dropout(p=dropout),
-    nn.ReLU(),
-    nn.Linear(64, 64),
-    nn.Dropout(p=dropout),
-    nn.ReLU(),
-    nn.Linear(64, emb_size),
-).to(device)
-config_emb = nn.Sequential(
-    nn.Linear(num_config_features, 64),
-    nn.Dropout(p=dropout),
-    nn.ReLU(),
-    nn.Linear(64, 64),
-    nn.Dropout(p=dropout),
-    nn.ReLU(),
-    nn.Linear(64, emb_size),
-).to(device)
-
-optimizer = torch.optim.AdamW(
-    list(input_emb.parameters()) + list(config_emb.parameters()), lr=0.0001
-)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", verbose=True)
-
-# lnloss = ListNetLoss()
-lnloss = rankNet
-
-# Early stopping
-best_loss = np.inf
-best_loss_iter = 0
-best_logmsg = None
-best_models = (None, None)
-patience = 200
-
-# For evaluation
-rank_arr = torch.from_numpy(
-    rank_map.reset_index()
-    .pivot_table(index="inputname", columns="configurationID", values=performance)
-    .values
-).to(device)
-regret_arr = torch.from_numpy(
+regret_val = (
     regret_map.reset_index()
     .pivot_table(index="inputname", columns="configurationID", values=performance)
     .values
-).to(device)
-rank_arr_cfg = regret_arr.T.argsort(dim=1)
+)
 
-train_input_arr = train_input_arr.to(device)
-train_config_arr = train_config_arr.to(device)
+icr = stats.rankdata(regret_val, method="max", axis=-1)
+inp_cfg_ranks = torch.from_numpy(icr - 1).float().to(device)
 
-total_loss = 0
-
-
-inp_cfg_ranks = regret_arr.argsort(dim=-1).float()
-# inp_cfg_ranks = inp_cfg_ranks / inp_cfg_ranks.max(dim=-1, keepdim=True).values
-icr = stats.rankdata(inp_cfg_ranks.numpy(), method="max", axis=-1)
-
-cfg_inp_ranks = regret_arr.T.argsort(dim=-1).float()
-# cfg_inp_ranks = cfg_inp_ranks / cfg_inp_ranks.max(dim=-1, keepdim=True).values
-cir = stats.rankdata(cfg_inp_ranks.numpy(), method="max", axis=-1)
+cir = stats.rankdata(regret_val.T, method="max", axis=-1)
+cfg_inp_ranks = torch.from_numpy(cir - 1).float().to(device)
 
 
 ## Configuration - Configuration
@@ -296,8 +239,7 @@ inp_inp_ranks_tensor = torch.from_numpy(inp_inp_ranks - 1).float().to(device)
 # TODO rankdata on test split or on full dataset?
 cfg_cfg_corr_t = pearson_rank_distance_matrix(
     np.expand_dims(
-        regret_map_all.loc[(test_inp, test_cfg), :]
-        .reset_index()
+        regret_map_all.reset_index()
         .pivot_table(index="configurationID", columns="inputname", values=performance)
         .values,
         axis=-1,
@@ -307,8 +249,7 @@ cfg_cfg_corr_t = pearson_rank_distance_matrix(
 # Yo this is not a rank, it's the pearson correlation
 inp_inp_corr_t = pearson_rank_distance_matrix(
     np.expand_dims(
-        regret_map_all.loc[(test_inp, test_cfg), :]
-        .reset_index()
+        regret_map_all.reset_index()
         .pivot_table(index="inputname", columns="configurationID", values=performance)
         .values,
         axis=-1,
@@ -320,23 +261,15 @@ ccrt = stats.rankdata(cfg_cfg_corr_t, method="max", axis=-1)
 
 
 def get_icrt_cirt(regret_map_all):
-    regret_arr_all = torch.from_numpy(
-        regret_map_all.loc[(test_inp, test_cfg), :]
-        .reset_index()
+    regret_arr_all = (
+        regret_map_all.reset_index()
         .pivot_table(index="inputname", columns="configurationID", values=performance)
         .values
-    ).to(device)
-    test_inp_cfg_ranks = regret_arr_all.argsort(dim=-1).float()
-    # test_inp_cfg_ranks = (
-    #     test_inp_cfg_ranks / test_inp_cfg_ranks.max(dim=-1, keepdim=True).values
-    # )
-    icrt = stats.rankdata(test_inp_cfg_ranks.numpy(), method="max", axis=-1)
+    )
 
-    test_cfg_inp_ranks = regret_arr_all.T.argsort(dim=-1).float()
-    # test_cfg_inp_ranks = (
-    #     test_cfg_inp_ranks / test_cfg_inp_ranks.max(dim=-1, keepdim=True).values
-    # )
-    cirt = stats.rankdata(test_cfg_inp_ranks.numpy(), method="max", axis=-1)
+    icrt = stats.rankdata(regret_arr_all, method="max", axis=-1)
+    cirt = stats.rankdata(regret_arr_all.T, method="max", axis=-1)
+
     return icrt, cirt
 
 
@@ -356,78 +289,161 @@ def eval(inp_emb, cfg_emb, iir, ccr, icr, cir):
     return (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp)
 
 
-best_loss = 999
-best_correct = 0
+def train(
+    train_input_arr,
+    train_config_arr,
+    input_arr,
+    config_arr,
+    emb_size,
+    device,
+    dropout=0.0,
+    lr=0.0001,
+    hidden_dim=64,
+    do_eval=True,
+    do_normalize=True,
+):
+    num_input_features = train_input_arr.shape[1]
+    num_config_features = train_config_arr.shape[1]
 
-for iteration in range(10_000):
-    inp_emb = F.normalize(input_emb(train_input_arr))
-    cfg_emb = F.normalize(config_emb(train_config_arr))
+    input_emb = nn.Sequential(
+        nn.Linear(num_input_features, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, emb_size),
+    ).to(device)
+    config_emb = nn.Sequential(
+        nn.Linear(num_config_features, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, emb_size),
+    ).to(device)
 
-    optimizer.zero_grad()
-    
-    loss = 0
-    
-    
-    distmat_inp = torch.cdist(inp_emb, inp_emb)
-    loss += lnloss(
-        distmat_inp,
-        inp_inp_ranks_tensor,
+    optimizer = torch.optim.AdamW(
+        list(input_emb.parameters()) + list(config_emb.parameters()), lr=lr
     )
-    distmat_cfg = torch.cdist(cfg_emb, cfg_emb)
-    loss += lnloss(
-        distmat_cfg,
-        cfg_cfg_ranks_tensor,
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, "min", verbose=True
     )
 
-    distmat = torch.cdist(inp_emb, cfg_emb)
-    loss += lnloss(
-        distmat,
-        inp_cfg_ranks,  # [input_indices, :][:, config_indices],
-    )
-    loss += lnloss(
-        distmat.T,
-        cfg_inp_ranks,  # [config_indices, :][:, input_indices],
-    )
+    # lnloss = ListNetLoss()
+    lnloss = rankNet  # seems to work much better, but slower
+    # does a form of triplet/pair mining internally
 
-    if loss < best_loss:
-        best_loss = loss.detach().item()
+    # Early stopping
+    best_loss = np.inf
 
-        with torch.no_grad():
-            (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp) = eval(
-                inp_emb, cfg_emb, inp_inp_ranks, cfg_cfg_ranks, icr, cir
-            )
-            avg_train = np.mean(
-                (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp)
-            )
+    train_input_arr = train_input_arr.to(device)
+    train_config_arr = train_config_arr.to(device)
 
-            inp_emb_test = F.normalize(input_emb(test_input_arr))
-            cfg_emb_test = F.normalize(config_emb(test_config_arr))
-            (
-                torrect_inp_inp,
-                tcorrect_cfg_cfg,
-                tcorrect_inp_cfg,
-                tcorrect_cfg_inp,
-            ) = eval(inp_emb_test, cfg_emb_test, iirt, ccrt, icrt, cirt)
-            avg_test = np.mean(
-                (
-                    torrect_inp_inp,
-                    tcorrect_cfg_cfg,
-                    tcorrect_inp_cfg,
-                    tcorrect_cfg_inp,
+    for iteration in range(10_000):
+        inp_emb = input_emb(train_input_arr)
+        cfg_emb = config_emb(train_config_arr)  # .detach()
+
+        if do_normalize:
+            inp_emb = F.normalize(inp_emb)
+            cfg_emb = F.normalize(cfg_emb)
+
+        optimizer.zero_grad()
+
+        loss = 0
+
+        distmat_inp = torch.cdist(inp_emb, inp_emb)
+        loss += lnloss(
+            distmat_inp,
+            inp_inp_ranks_tensor,
+        )
+        distmat_cfg = torch.cdist(cfg_emb, cfg_emb)
+        loss += lnloss(
+            distmat_cfg,
+            cfg_cfg_ranks_tensor,
+        )
+
+        distmat = torch.cdist(inp_emb, cfg_emb)
+        loss += lnloss(
+            distmat,
+            inp_cfg_ranks,  # [input_indices, :][:, config_indices],
+        )
+        loss += lnloss(
+            distmat.T,
+            cfg_inp_ranks,  # [config_indices, :][:, input_indices],
+        )
+
+        if loss < best_loss:
+            best_loss = loss.detach().item()
+
+            if do_eval:
+                with torch.no_grad():
+                    (
+                        correct_inp_inp,
+                        correct_cfg_cfg,
+                        correct_inp_cfg,
+                        correct_cfg_inp,
+                    ) = eval(inp_emb, cfg_emb, inp_inp_ranks, cfg_cfg_ranks, icr, cir)
+                    avg_train = np.mean(
+                        (
+                            correct_inp_inp,
+                            correct_cfg_cfg,
+                            correct_inp_cfg,
+                            correct_cfg_inp,
+                        )
+                    )
+
+                    inp_emb_test = input_emb(input_arr)
+                    cfg_emb_test = config_emb(config_arr)
+
+                    if do_normalize:
+                        inp_emb_test = F.normalize(inp_emb_test)
+                        cfg_emb_test = F.normalize(cfg_emb_test)
+
+                    # TODO Technically we only care about the ranking of the test inputs/configurations, not all of them
+                    (
+                        torrect_inp_inp,
+                        tcorrect_cfg_cfg,
+                        tcorrect_inp_cfg,
+                        tcorrect_cfg_inp,
+                    ) = eval(inp_emb_test, cfg_emb_test, iirt, ccrt, icrt, cirt)
+                    avg_test = np.mean(
+                        (
+                            torrect_inp_inp,
+                            tcorrect_cfg_cfg,
+                            tcorrect_inp_cfg,
+                            tcorrect_cfg_inp,
+                        )
+                    )
+
+                print(
+                    f"{iteration}\t{loss.item():.3f} | {avg_train:.3f} | {correct_inp_inp:.3f} | {correct_cfg_cfg:.3f} | {correct_inp_cfg:.3f} | {correct_cfg_inp:.3f}"
                 )
-            )
+                print(
+                    f"test\t\t{avg_test:.3f} | {torrect_inp_inp:.3f} | {tcorrect_cfg_cfg:.3f} | {tcorrect_inp_cfg:.3f} | {tcorrect_cfg_inp:.3f}"
+                )
+                if correct_inp_inp > 0.99 and correct_cfg_cfg > 0.99:
+                    break
 
-        print(
-            f"{iteration}\t{loss.item():.3f} | {avg_train:.3f} | {correct_inp_inp:.3f} | {correct_cfg_cfg:.3f} | {correct_inp_cfg:.3f} | {correct_cfg_inp:.3f}"
-        )
-        print(
-            f"test\t\t{torrect_inp_inp:.3f} | {avg_test:.3f} | {tcorrect_cfg_cfg:.3f} | {tcorrect_inp_cfg:.3f} | {tcorrect_cfg_inp:.3f}"
-        )
-        if correct_inp_inp > 0.99 and correct_cfg_cfg > 0.99:
-            break
+        loss.backward()
+        optimizer.step()
 
-    loss.backward()
-    optimizer.step()
+    return best_loss
+
+
+train(
+    train_input_arr,
+    train_config_arr,
+    input_arr,
+    config_arr,
+    emb_size=16,
+    device=device,
+    dropout=0.0,
+    lr=0.0003,
+    hidden_dim=64,
+    do_eval=True,
+)
 
 # %%
 
