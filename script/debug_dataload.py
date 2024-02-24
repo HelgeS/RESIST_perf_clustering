@@ -1,38 +1,20 @@
 # %%
-import argparse
-import copy
-import datetime
 import itertools
-import os
 
 import numpy as np
-import pandas as pd
+from functools import partial
 import torch
 import torch.nn.functional as F
 from common import (
-    evaluate_ic,
-    evaluate_ii,
     load_data,
-    make_latex_tables,
     pearson_rank_distance_matrix,
     split_data,
-    split_data_cv,
-    evaluate_prediction,
-    evaluate_retrieval,
 )
 from scipy import stats
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
 from torch import nn
 
-from representation import (
-    ListNetLoss,
-    ccc_cmp_fn,
-    cii_cmp_fn,
-    icc_cmp_fn,
-    iii_cmp_fn,
-    make_batch,
-)
+from ray import train, tune
+from ray.tune.search.optuna import OptunaSearch
 
 # %%
 data_dir = "../data/"
@@ -134,6 +116,7 @@ def rankNet(
     padded_value_indicator=-1,
     weight_by_diff=False,
     weight_by_diff_powed=False,
+    max_subtract=True,
 ):
     """
     RankNet loss introduced in "Learning to Rank using Gradient Descent".
@@ -145,6 +128,13 @@ def rankNet(
     """
     y_pred = y_pred.clone()
     y_true = y_true.clone()
+
+    if max_subtract:
+        y_pred = y_pred.max(dim=-1).values.unsqueeze(1) - y_pred
+        y_true = y_true.max(dim=-1).values.unsqueeze(1) - y_true
+    else:
+        y_pred = y_pred / y_pred.max(dim=-1).values.unsqueeze(1)
+        y_true = y_true / y_true.max(dim=-1).values.unsqueeze(1)
 
     mask = y_true == padded_value_indicator
     y_pred[mask] = float("-inf")
@@ -199,6 +189,13 @@ regret_val = (
     .values
 )
 
+# Kleinster Wert - kleinster/bester Rank
+# rankNet: Bester Rank - hoechster Wert
+# Modify rankNet: Adjust scores by subtraction from max or divide by max
+# (not sure which or if it does matter)
+
+# TODO Easy function for the whole data preparation and ranking
+
 icr = stats.rankdata(regret_val, method="max", axis=-1)
 inp_cfg_ranks = torch.from_numpy(icr - 1).float().to(device)
 
@@ -217,8 +214,7 @@ cfg_cfg_corr = pearson_rank_distance_matrix(
     )
 ).squeeze(-1)
 cfg_cfg_ranks = stats.rankdata(cfg_cfg_corr, method="max", axis=-1)
-# TODO Needs -1?
-cfg_cfg_ranks_tensor = torch.from_numpy(cfg_cfg_ranks - 1).float().to(device)
+cfg_cfg_ranks_tensor = torch.from_numpy(cfg_cfg_ranks).float().to(device)
 
 ## Input - Input
 inp_inp_corr = pearson_rank_distance_matrix(
@@ -231,8 +227,7 @@ inp_inp_corr = pearson_rank_distance_matrix(
     )
 ).squeeze(-1)
 inp_inp_ranks = stats.rankdata(inp_inp_corr, method="max", axis=-1)
-# TODO Needs -1?
-inp_inp_ranks_tensor = torch.from_numpy(inp_inp_ranks - 1).float().to(device)
+inp_inp_ranks_tensor = torch.from_numpy(inp_inp_ranks).float().to(device)
 
 
 ### TEST DATA
@@ -289,19 +284,33 @@ def eval(inp_emb, cfg_emb, iir, ccr, icr, cir):
     return (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp)
 
 
-def train(
+# %%
+
+
+def train_func(
     train_input_arr,
     train_config_arr,
     input_arr,
     config_arr,
     emb_size,
     device,
+    iterations,
     dropout=0.0,
     lr=0.0001,
     hidden_dim=64,
     do_eval=True,
     do_normalize=True,
+    verbose=True,
 ):
+    # iterations = 5000
+    # emb_size = 16
+    # device = device
+    # dropout = 0.0
+    # lr = 0.0003
+    # hidden_dim = 64
+    # do_eval = True
+    # do_normalize = True
+
     num_input_features = train_input_arr.shape[1]
     num_config_features = train_config_arr.shape[1]
 
@@ -332,16 +341,20 @@ def train(
     )
 
     # lnloss = ListNetLoss()
+    lnloss = partial(
+        rankNet, weight_by_diff=False, weight_by_diff_powed=False, max_subtract=True
+    )
     lnloss = rankNet  # seems to work much better, but slower
     # does a form of triplet/pair mining internally
 
     # Early stopping
     best_loss = np.inf
+    best_test_score = 0
 
     train_input_arr = train_input_arr.to(device)
     train_config_arr = train_config_arr.to(device)
 
-    for iteration in range(10_000):
+    for iteration in range(iterations):
         inp_emb = input_emb(train_input_arr)
         cfg_emb = config_emb(train_config_arr)  # .detach()
 
@@ -416,34 +429,87 @@ def train(
                             tcorrect_cfg_inp,
                         )
                     )
+                    train.report(
+                        {
+                            "score": avg_test,
+                            "train_score": avg_train,
+                            "loss": best_loss,
+                            "iteration": iteration,
+                        }
+                    )
+                    if avg_test > best_test_score:
+                        best_test_score = avg_test
 
-                print(
-                    f"{iteration}\t{loss.item():.3f} | {avg_train:.3f} | {correct_inp_inp:.3f} | {correct_cfg_cfg:.3f} | {correct_inp_cfg:.3f} | {correct_cfg_inp:.3f}"
-                )
-                print(
-                    f"test\t\t{avg_test:.3f} | {torrect_inp_inp:.3f} | {tcorrect_cfg_cfg:.3f} | {tcorrect_inp_cfg:.3f} | {tcorrect_cfg_inp:.3f}"
-                )
+                if verbose:
+                    print(
+                        f"{iteration}\t{loss.item():.3f} | {avg_train:.3f} | {correct_inp_inp:.3f} | {correct_cfg_cfg:.3f} | {correct_inp_cfg:.3f} | {correct_cfg_inp:.3f}"
+                    )
+                    print(
+                        f"test\t\t{avg_test:.3f} | {torrect_inp_inp:.3f} | {tcorrect_cfg_cfg:.3f} | {tcorrect_inp_cfg:.3f} | {tcorrect_cfg_inp:.3f}"
+                    )
                 if correct_inp_inp > 0.99 and correct_cfg_cfg > 0.99:
                     break
 
         loss.backward()
         optimizer.step()
 
-    return best_loss
+    train.report({"score": best_test_score, "loss": best_loss, "iteration": iteration})
+    return best_loss, best_test_score
 
 
-train(
-    train_input_arr,
-    train_config_arr,
-    input_arr,
-    config_arr,
-    emb_size=16,
-    device=device,
-    dropout=0.0,
-    lr=0.0003,
-    hidden_dim=64,
-    do_eval=True,
+# train(
+#     train_input_arr,
+#     train_config_arr,
+#     input_arr,
+#     config_arr,
+#     iterations=1000,
+#     emb_size=16,
+#     device=device,
+#     dropout=0.0,
+#     lr=0.0003,
+#     hidden_dim=64,
+#     do_eval=True,
+# )
+
+
+def tune_func(config):
+    train_func(
+        train_input_arr,
+        train_config_arr,
+        input_arr,
+        config_arr,
+        iterations=2500,
+        emb_size=config["emb_size"],
+        device=device,
+        dropout=config["dropout"],
+        lr=config["lr"],
+        hidden_dim=config["hidden_dim"],
+        do_normalize=config["do_normalize"],
+        do_eval=True,
+        verbose=False,
+    )
+
+
+search_space = {
+    "lr": tune.loguniform(1e-4, 1e-2),
+    "dropout": tune.uniform(0.0, 0.5),
+    "emb_size": tune.choice([8, 16, 32, 64, 128, 256]),
+    "hidden_dim": tune.choice([8, 16, 32, 64, 128, 256]),
+    "max_subtract": tune.choice([True, False]),
+    "do_normalize": tune.choice([True, False]),
+}
+algo = OptunaSearch()
+tuner = tune.Tuner(
+    tune_func,
+    tune_config=tune.TuneConfig(
+        metric="score", mode="max", search_alg=algo, num_samples=100
+    ),
+    param_space=search_space,
+    run_config=train.RunConfig(
+        stop={"training_iteration": 1000},
+    ),
 )
+tuner.fit()
 
 # %%
 
@@ -475,32 +541,32 @@ cc_dist_mat = pearson_rank_distance_matrix(measurements.swapaxes(0, 1))
 
 
 # %%
-perf_predict = nn.Sequential(
-    nn.Linear(2 * emb_size, 64),
-    nn.ReLU(),
-    nn.Linear(64, 1),  # TODO Check with |P| outputs
-)
-from sklearn.preprocessing import StandardScaler
+# perf_predict = nn.Sequential(
+#     nn.Linear(2 * emb_size, 64),
+#     nn.ReLU(),
+#     nn.Linear(64, 1),  # TODO Check with |P| outputs
+# )
+# from sklearn.preprocessing import StandardScaler
 
-scaler = StandardScaler()
-y_train = torch.from_numpy(
-    scaler.fit_transform(train_data[all_performances[0]].values.reshape(-1, 1))
-)
+# scaler = StandardScaler()
+# y_train = torch.from_numpy(
+#     scaler.fit_transform(train_data[all_performances[0]].values.reshape(-1, 1))
+# )
 
-train_indices = np.vstack(
-    (
-        train_data.configurationID.apply(
-            lambda s: np.where(train_cfg == s)[0].item()
-        ).values,
-        train_data.inputname.apply(lambda s: np.where(train_inp == s)[0].item()).values,
-    )
-).T
+# train_indices = np.vstack(
+#     (
+#         train_data.configurationID.apply(
+#             lambda s: np.where(train_cfg == s)[0].item()
+#         ).values,
+#         train_data.inputname.apply(lambda s: np.where(train_inp == s)[0].item()).values,
+#     )
+# ).T
 
-X_train = torch.hstack(
-    (
-        config_emb(train_config_arr[train_indices[:, 0]]),
-        input_emb(train_input_arr[train_indices[:, 1]]),
-    )
-)
-regr_loss = F.mse_loss(perf_predict(X_train), y_train)
+# X_train = torch.hstack(
+#     (
+#         config_emb(train_config_arr[train_indices[:, 0]]),
+#         input_emb(train_input_arr[train_indices[:, 1]]),
+#     )
+# )
+# regr_loss = F.mse_loss(perf_predict(X_train), y_train)
 # %%
