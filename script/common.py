@@ -363,6 +363,38 @@ def wilcoxon_distance(measurements):
     return stat_distance(measurements, stats_fn=stats.wilcoxon)
 
 
+def pareto_rank_numpy(data):
+    """Calculate the pareto front rank for each row in the numpy array."""
+    unassigned = np.ones(len(data), dtype=bool)
+    ranks = np.zeros(len(data), dtype=np.int32)
+    front = 0
+
+    while np.any(unassigned):
+        front += 1
+
+        # Adapted from https://github.com/QUVA-Lab/artemis/blob/peter/artemis/general/pareto_efficiency.py
+        is_efficient = np.ones(data.shape[0], dtype=bool)
+        is_efficient[~unassigned] = False
+        for i, c in enumerate(data):
+            if is_efficient[i]:
+                # Keep any point with a lower cost or all cost exactly equal (for ties)
+                is_efficient[is_efficient] = np.logical_or(np.any(
+                    data[is_efficient] < c, axis=1
+                ), np.all(
+                    data[is_efficient] == c, axis=1
+                ))  
+                # is_efficient[i] = True  # And keep self
+
+        ranks[is_efficient] = front
+        unassigned[is_efficient] = False
+
+    return ranks
+
+
+def pareto_rank(pd_group):
+    return pd.Series(pareto_rank_numpy(pd_group.values), index=pd_group.index)
+
+
 def top_k_closest_euclidean(emb1, emb2=None, k=5):
     if emb2 is None:
         distance = torch.cdist(emb1, emb1, p=2)
