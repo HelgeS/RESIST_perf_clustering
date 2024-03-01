@@ -1,6 +1,7 @@
 import argparse
 import copy
 import datetime
+import functools
 import itertools
 import os
 
@@ -25,217 +26,6 @@ from torch import nn
 # Purpose of this file
 # We learn a simple embedding of the input and configuration vectors
 # Input_embed() Config_embed() → joint embedding space
-# Metric learning on triplets with relative relevance from collected data
-# (A, P, N) triplet → Anchor, Positive Example, Negative Example
-# I-I-I triplet: Inputs are closer if they benefit from the same configurations
-# C-C-C triplet: Configurations are closer if they show higher effects on the same inputs
-# C-I-I triplet: A configuration is closer to the input it has a higher effect on
-# I-C-C triplet: An input is closer to the configuration it has a higher effect on
-
-# Dataset construction
-# Lookup table: (C,I), (I,I), (C,C)
-
-# At each batch we need n triplets
-# We can precalculate all triplets and pick from them or sample on the fly
-# Let's first iterate on the pre-generation
-
-# We define four functions to rank two items compared to an anchor item
-
-# TODO cmp_fn can only handle a single performance measure in `rank_map`
-
-
-def iii_cmp_fn(inp1, inp2, inp3, rank_map=None, lookup=None):
-    """Returns which of inp2 and inp3 is closer to inp1 in terms of rank correlation (pearson)."""
-    if lookup is not None:
-        i1i2 = lookup[tuple(sorted((inp1, inp2)))]
-        i1i3 = lookup[tuple(sorted((inp1, inp3)))]
-    elif rank_map is not None:
-        i1i2 = rank_map.loc[inp1].corrwith(rank_map.loc[inp2])
-        i1i3 = rank_map.loc[inp1].corrwith(rank_map.loc[inp3])
-    else:
-        raise Exception("Either `rank_map` or `lookup` must be provided.")
-
-    if (i1i2 < i1i3).item():
-        return ("iii", inp1, inp2, inp3)
-    else:
-        return ("iii", inp1, inp3, inp2)
-
-
-def ccc_cmp_fn(cfg1, cfg2, cfg3, rank_map=None, lookup=None):
-    """Returns which of cfg2 and cfg3 is closer to cfg1 in terms of rank correlation (pearson)."""
-    if lookup is not None:
-        c1c2 = lookup[tuple(sorted((cfg1, cfg2)))]
-        c1c3 = lookup[tuple(sorted((cfg1, cfg3)))]
-    elif rank_map is not None:
-        c1c2 = rank_map.xs(cfg1, level=1).corrwith(rank_map.xs(cfg2, level=1))
-        c1c3 = rank_map.xs(cfg1, level=1).corrwith(rank_map.xs(cfg3, level=1))
-    else:
-        raise Exception("Either `rank_map` or `lookup` must be provided.")
-
-    if (c1c2 < c1c3).item():
-        return ("ccc", cfg1, cfg2, cfg3)
-    else:
-        return ("ccc", cfg1, cfg3, cfg2)
-
-
-def cii_cmp_fn(cfg, inp1, inp2, rank_map):
-    ci1 = rank_map.loc[(inp1, cfg)]
-    ci2 = rank_map.loc[(inp2, cfg)]
-
-    if (ci1 < ci2).item():
-        return ("cii", cfg, inp1, inp2)
-    else:
-        return ("cii", cfg, inp2, inp1)
-
-
-def icc_cmp_fn(inp, cfg1, cfg2, rank_map):
-    ic1 = rank_map.loc[(inp, cfg1)]
-    ic2 = rank_map.loc[(inp, cfg2)]
-
-    if (ic1 < ic2).item():
-        return ("icc", inp, cfg1, cfg2)
-    else:
-        return ("icc", inp, cfg2, cfg1)
-
-
-# TODO Make vectorized version that splits evenly between the tasks
-def make_batch(
-    inputs, configs, size, input_map, config_map, rank_map=None, lookup=None
-):
-    batch_idx = []
-    input_indices = []
-    config_indices = []
-    for _ in range(size):
-        task = np.random.choice(4)
-        if task == 0:  # iii
-            params = np.random.choice(inputs, size=3, replace=False)
-            triplet = iii_cmp_fn(*params, rank_map=rank_map, lookup=lookup)
-        elif task == 1:  # ccc
-            params = np.random.choice(configs, size=3, replace=False)
-            triplet = ccc_cmp_fn(*params, rank_map=rank_map, lookup=lookup)
-        elif task == 2:  # icc
-            inp = np.random.choice(inputs)
-            cfgs = np.random.choice(
-                rank_map.xs(inp, level=0).index, size=2, replace=False
-            )
-            triplet = icc_cmp_fn(inp, *cfgs, rank_map=rank_map)
-        else:  # cii
-            cfg = np.random.choice(configs)
-            inps = np.random.choice(
-                rank_map.xs(cfg, level=1).index, size=2, replace=False
-            )
-            triplet = cii_cmp_fn(cfg, *inps, rank_map=rank_map)
-
-        t, a, p, n = triplet
-        batch_idx.append(
-            (
-                t[0] == "i",
-                input_map[a] if t[0] == "i" else config_map[a],
-                t[1] == "i",
-                input_map[p] if t[1] == "i" else config_map[p],
-                t[2] == "i",
-                input_map[n] if t[2] == "i" else config_map[n],
-            )
-        )
-        if t[0] == "i":
-            input_indices.append(input_map[a])
-        else:
-            config_indices.append(config_map[a])
-
-        if t[1] == "i":
-            input_indices.append(input_map[p])
-        else:
-            config_indices.append(config_map[p])
-
-        if t[2] == "i":
-            input_indices.append(input_map[n])
-        else:
-            config_indices.append(config_map[n])
-
-    return (
-        torch.tensor(batch_idx),
-        torch.tensor(input_indices),
-        torch.tensor(config_indices),
-    )
-
-
-def make_batch_v2(
-    inputs, configs, size, input_map, config_map, rank_map=None, lookup=None
-):
-    """This samples a set of `size` inputs + configs and constructs all possible triplets from them."""
-    half_size = size // 2
-    sampled_ttinp = np.random.choice(inputs, size=half_size, replace=False)
-    sampled_ttcfg = np.random.choice(configs, size=half_size, replace=False)
-    batch_idx = []
-
-    # iii task
-    for inp1, inp2, inp3 in itertools.combinations(sampled_ttinp, 3):
-        batch_idx.append(iii_cmp_fn(inp1, inp2, inp3, rank_map=rank_map, lookup=lookup))
-
-    # ccc task
-    for cfg1, cfg2, cfg3 in itertools.combinations(sampled_ttcfg, 3):
-        batch_idx.append(ccc_cmp_fn(cfg1, cfg2, cfg3, rank_map=rank_map, lookup=lookup))
-
-    # icc task
-    for inp in sampled_ttinp:
-        for cfg1, cfg2 in itertools.combinations(sampled_ttcfg, 2):
-            batch_idx.append(icc_cmp_fn(inp, cfg1, cfg2, rank_map=rank_map))
-
-    # cii task
-    for cfg in sampled_ttcfg:
-        for inp1, inp2 in itertools.combinations(sampled_ttinp, 2):
-            batch_idx.append(cii_cmp_fn(cfg, inp1, inp2, rank_map=rank_map))
-
-    # Convert to indices and tensor
-    batch_idx = [
-        (
-            t[0] == "i",
-            input_map[a] if t[0] == "i" else config_map[a],
-            t[1] == "i",
-            input_map[p] if t[1] == "i" else config_map[p],
-            t[2] == "i",
-            input_map[n] if t[2] == "i" else config_map[n],
-        )
-        for t, a, p, n in batch_idx
-    ]
-    return torch.tensor(batch_idx)
-
-
-def make_batch_v3(inputs, configs, size, rank_map=None, lookup=None):
-    mask = torch.tensor([[1, 1, 1], [0, 0, 0], [1, 0, 0], [0, 1, 1]], dtype=bool)
-    batch_mask = mask[np.random.choice(mask.shape[0], size=10, replace=True)]
-    # n_inputs = batch_mask.sum()
-    # n_configs = (~batch_mask).sum()
-
-    # selected_inputs = np.random.choice(len(inputs), size=(n_inputs,), replace=False)
-    # seleced_configs = np.random.choice(len(configs), size=(n_configs,), replace=False)
-
-    batch_idx = torch.empty((size, 6), dtype=int)
-    batch_idx[:, 0::2] = batch_mask
-    batch_idx[:, 1::2][batch_mask] = torch.from_numpy()
-    batch_idx[:, 1::2][~batch_mask] = torch.from_numpy()
-
-    for i in range(size):
-        a, p, n = batch_idx[i, 1::2]
-
-        if (batch_idx[i, 0::2] == mask[0]).all():
-            row = iii_cmp_fn(
-                inputs[a], inputs[p], inputs[n], rank_map=rank_map, lookup=lookup
-            )[1:]
-        elif (batch_idx[i, 0::2] == mask[1]).all():
-            row = ccc_cmp_fn(
-                configs[a], configs[p], configs[n], rank_map=rank_map, lookup=lookup
-            )[1:]
-        elif (batch_idx[i, 0::2] == mask[2]).all():
-            row = icc_cmp_fn(inputs[a], configs[p], configs[n], rank_map=rank_map)[1:]
-        elif (batch_idx[i, 0::2] == mask[3]).all():
-            row = cii_cmp_fn(configs[a], inputs[p], inputs[n], rank_map=rank_map)[1:]
-        else:
-            raise Exception("Something went wrong")
-
-        batch_idx[:, 1::2] = row
-
-    return batch_idx
 
 
 class ListNetLoss(nn.Module):
@@ -255,13 +45,13 @@ class ListNetLoss(nn.Module):
         return torch.mean(-torch.sum(true_probs * torch.log(pred_probs + 1e-10), dim=1))
 
 
-# https://github.com/allegro/allRank/blob/master/allrank/models/losses/rankNet.py
 def rankNet(
     y_pred,
     y_true,
     padded_value_indicator=-1,
     weight_by_diff=False,
     weight_by_diff_powed=False,
+    max_subtract=True,
 ):
     """
     RankNet loss introduced in "Learning to Rank using Gradient Descent".
@@ -271,12 +61,20 @@ def rankNet(
     :param weight_by_diff_powed: flag indicating whether to weight the score differences by the squared ground truth differences.
     :return: loss value, a torch.Tensor
     """
+    # Original code from https://github.com/allegro/allRank/blob/master/allrank/models/losses/rankNet.py
     y_pred = y_pred.clone()
     y_true = y_true.clone()
 
-    # mask = y_true == padded_value_indicator
-    # y_pred[mask] = float("-inf")
-    # y_true[mask] = float("-inf")
+    if max_subtract:
+        y_pred = y_pred.max(dim=-1).values.unsqueeze(1) - y_pred
+        y_true = y_true.max(dim=-1).values.unsqueeze(1) - y_true
+    else:
+        y_pred = y_pred / y_pred.max(dim=-1).values.unsqueeze(1)
+        y_true = y_true / y_true.max(dim=-1).values.unsqueeze(1)
+
+    mask = y_true == padded_value_indicator
+    y_pred[mask] = float("-inf")
+    y_true[mask] = float("-inf")
 
     # here we generate every pair of indices from the range of document length in the batch
     document_pairs_candidates = list(
@@ -317,9 +115,199 @@ def rankNet(
     return nn.BCEWithLogitsLoss(weight=weight)(pred_diffs, true_diffs)
 
 
-def predict(model, x):
-    # return F.normalize(model(x), p=2, dim=1)
-    return model(x)
+def predict(model, x, normalize=False):
+    z = model(x)
+
+    if normalize:
+        z = F.normalize(z, p=2, dim=1)
+
+    return z
+
+
+def train_model_rank(
+    train_input_arr,
+    train_config_arr,
+    input_arr,
+    config_arr,
+    ranks_train,
+    ranks_test,
+    emb_size,
+    device,
+    iterations,
+    dropout=0.0,
+    lr=0.0001,
+    hidden_dim=64,
+    do_eval=True,
+    do_normalize=True,
+    verbose=True,
+    use_scheduler=False,
+    max_subtract=False,
+    ranknet_weight_by_diff=False,
+):
+    # iterations = 5000
+    # emb_size = 16
+    # device = device
+    # dropout = 0.0
+    # lr = 0.0003
+    # hidden_dim = 64
+    # do_eval = True
+    # do_normalize = True
+
+    ## Models
+    num_input_features = train_input_arr.shape[1]
+    num_config_features = train_config_arr.shape[1]
+
+    input_emb = nn.Sequential(
+        nn.Linear(num_input_features, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, emb_size),
+    ).to(device)
+    config_emb = nn.Sequential(
+        nn.Linear(num_config_features, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, emb_size),
+    ).to(device)
+
+    optimizer = torch.optim.AdamW(
+        list(input_emb.parameters()) + list(config_emb.parameters()), lr=lr
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, "min", verbose=verbose
+    )
+
+    # lnloss = ListNetLoss()
+    lnloss = functools.partial(
+        rankNet,
+        weight_by_diff=ranknet_weight_by_diff,
+        weight_by_diff_powed=False,
+        max_subtract=max_subtract,
+    )
+    # lnloss = rankNet  # seems to work much better, but slower
+    # does a form of triplet/pair mining internally
+
+    # TODO Should we adjust the list ranking loss to consider min distances?
+    # This could be part of the distance matrix,
+    # i.e. something like the cumsum to enforce min distances between items
+
+    # Early stopping
+    best_loss = np.inf
+    best_test_score = 0
+
+    train_input_arr = train_input_arr.to(device)
+    train_config_arr = train_config_arr.to(device)
+    inp_cfg_ranks_pt = torch.from_numpy(ranks_train["inp_cfg"]).float().to(device)
+    cfg_inp_ranks_pt = torch.from_numpy(ranks_train["cfg_inp"]).float().to(device)
+    inp_inp_ranks_pt = torch.from_numpy(ranks_train["inp_inp"]).float().to(device)
+    cfg_cfg_ranks_pt = torch.from_numpy(ranks_train["cfg_cfg"]).float().to(device)
+
+    for iteration in range(iterations):
+        # TODO Optionally, sample some inputs and configs if dataset too large
+        # Check for x264
+
+        inp_emb = input_emb(train_input_arr)
+        cfg_emb = config_emb(train_config_arr)  # .detach()
+
+        if do_normalize:
+            inp_emb = F.normalize(inp_emb)
+            cfg_emb = F.normalize(cfg_emb)
+
+        loss = 0
+
+        distmat_inp = torch.cdist(inp_emb, inp_emb)
+        loss += lnloss(
+            distmat_inp,
+            inp_inp_ranks_pt,
+        )
+        distmat_cfg = torch.cdist(cfg_emb, cfg_emb)
+        loss += lnloss(
+            distmat_cfg,
+            cfg_cfg_ranks_pt,
+        )
+
+        distmat = torch.cdist(inp_emb, cfg_emb)
+        loss += lnloss(
+            distmat,
+            inp_cfg_ranks_pt,  # [input_indices, :][:, config_indices],
+        )
+        loss += lnloss(
+            distmat.T,
+            cfg_inp_ranks_pt,  # [config_indices, :][:, input_indices],
+        )
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if use_scheduler:
+            scheduler.step(loss)
+
+        if loss < best_loss:
+            best_loss = loss.detach().item()
+
+            if do_eval:
+                with torch.no_grad():
+                    (
+                        correct_inp_inp,
+                        correct_cfg_cfg,
+                        correct_inp_cfg,
+                        correct_cfg_inp,
+                    ) = eval(inp_emb, cfg_emb, ranks_train)
+                    avg_train = np.mean(
+                        (
+                            correct_inp_inp,
+                            correct_cfg_cfg,
+                            correct_inp_cfg,
+                            correct_cfg_inp,
+                        )
+                    )
+
+                    inp_emb_test = input_emb(input_arr)
+                    cfg_emb_test = config_emb(config_arr)
+
+                    if do_normalize:
+                        inp_emb_test = F.normalize(inp_emb_test)
+                        cfg_emb_test = F.normalize(cfg_emb_test)
+
+                    # TODO Technically we only care about the ranking of the test inputs/configurations, not all of them
+                    (
+                        torrect_inp_inp,
+                        tcorrect_cfg_cfg,
+                        tcorrect_inp_cfg,
+                        tcorrect_cfg_inp,
+                    ) = eval(
+                        inp_emb_test,
+                        cfg_emb_test,
+                        ranks_test,
+                    )
+                    avg_test = np.mean(
+                        (
+                            torrect_inp_inp,
+                            tcorrect_cfg_cfg,
+                            tcorrect_inp_cfg,
+                            tcorrect_cfg_inp,
+                        )
+                    )
+                    if avg_test > best_test_score:
+                        best_test_score = avg_test
+
+                if verbose:
+                    print(
+                        f"{iteration}\t{loss.item():.3f} | {avg_train:.3f} | {correct_inp_inp:.3f} | {correct_cfg_cfg:.3f} | {correct_inp_cfg:.3f} | {correct_cfg_inp:.3f}"
+                    )
+                    print(
+                        f"test\t\t{avg_test:.3f} | {torrect_inp_inp:.3f} | {tcorrect_cfg_cfg:.3f} | {tcorrect_inp_cfg:.3f} | {tcorrect_cfg_inp:.3f}"
+                    )
+                if correct_inp_inp > 0.99 and correct_cfg_cfg > 0.99:
+                    break
+
+    return best_loss, best_test_score
 
 
 def train_model(
@@ -327,30 +315,36 @@ def train_model(
     train_cfg,
     train_input_arr,
     train_config_arr,
-    error_regret,
+    regret_map,
     performance,
     emb_size,
     epochs,
+    lr=0.003,
+    hidden_dim=32,
+    dropout=0.0,
 ):
     num_input_features = train_input_arr.shape[1]
     num_config_features = train_config_arr.shape[1]
-    input_map = {s: i for i, s in enumerate(train_inp)}
-    config_map = {s: i for i, s in enumerate(train_cfg)}
-    batch_size = 256
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     input_emb = nn.Sequential(
-        nn.Linear(num_input_features, 64),
-        nn.Dropout(),
+        nn.Linear(num_input_features, hidden_dim),
+        nn.Dropout(p=dropout),
         nn.ReLU(),
-        nn.Linear(64, emb_size),
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, emb_size),
     ).to(device)
     config_emb = nn.Sequential(
-        nn.Linear(num_config_features, 64),
-        nn.Dropout(),
+        nn.Linear(num_config_features, hidden_dim),
+        nn.Dropout(p=dropout),
         nn.ReLU(),
-        nn.Linear(64, emb_size),
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.Dropout(p=dropout),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, emb_size),
     ).to(device)
 
     # TODO Implement performance prediction from latent space
@@ -361,14 +355,18 @@ def train_model(
     # )
 
     optimizer = torch.optim.AdamW(
-        list(input_emb.parameters()) + list(config_emb.parameters()), lr=0.00001
+        list(input_emb.parameters()) + list(config_emb.parameters()), lr=lr
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, "min", verbose=True
     )
 
-    # lnloss = rankNet  # ListNetLoss()
-    lnloss = ListNetLoss()
+    # lnloss = ListNetLoss()
+    lnloss = functools.partial(
+        rankNet,
+        weight_by_diff=True,
+        weight_by_diff_powed=False,
+    )
 
     # Early stopping
     best_loss = np.inf
@@ -388,7 +386,7 @@ def train_model(
     #     emb_lookup[train_input_arr.shape[0] :] = config_emb(train_config_arr)
 
     regret_arr = torch.from_numpy(
-        error_regret.loc[(train_inp, train_cfg), :]
+        regret_map.loc[(train_inp, train_cfg), :]
         .reset_index()
         .pivot_table(index="inputname", columns="configurationID", values=performance)
         .values
@@ -403,7 +401,7 @@ def train_model(
     inp_inp_ranks = torch.from_numpy(
         pearson_rank_distance_matrix(
             np.expand_dims(
-                error_regret.loc[(train_inp, train_cfg), :]
+                regret_map.loc[(train_inp, train_cfg), :]
                 .reset_index()
                 .pivot_table(
                     index="inputname", columns="configurationID", values=performance
@@ -416,7 +414,7 @@ def train_model(
     cfg_cfg_ranks = torch.from_numpy(
         pearson_rank_distance_matrix(
             np.expand_dims(
-                error_regret.loc[(train_inp, train_cfg), :]
+                regret_map.loc[(train_inp, train_cfg), :]
                 .reset_index()
                 .pivot_table(
                     index="configurationID", columns="inputname", values=performance
@@ -508,13 +506,12 @@ def train_model(
         #     cfg_cfg_ranks[config_indices, :][:, config_indices],
         # )
 
-        # TODO Should we adjust the list ranking loss to consider min distances?
-        # This could be part of the distance matrix,
-        # i.e. something like the cumsum to enforce min distances between items
+
 
         ## Here we take the distance matrix and sample easy positive/hard negative
         # Rank mismatch
 
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         total_loss += loss.cpu().item()
@@ -548,14 +545,22 @@ def train_model(
                     n_recs=[1, 3, 5, 15, 25],
                 )
 
-                cc_sort = torch.mean((
-                    distmat_cc.argsort(dim=-1)
-                    == cfg_cfg_ranks[config_indices, :][:, config_indices].argsort(dim=-1)
-                ).float())
-                ii_sort = torch.mean((
-                    distmat_ii.argsort(dim=-1)
-                    == inp_inp_ranks[input_indices, :][:, input_indices].argsort(dim=-1)
-                ).float())
+                cc_sort = torch.mean(
+                    (
+                        distmat_cc.argsort(dim=-1)
+                        == cfg_cfg_ranks[config_indices, :][:, config_indices].argsort(
+                            dim=-1
+                        )
+                    ).float()
+                )
+                ii_sort = torch.mean(
+                    (
+                        distmat_ii.argsort(dim=-1)
+                        == inp_inp_ranks[input_indices, :][:, input_indices].argsort(
+                            dim=-1
+                        )
+                    ).float()
+                )
 
                 print(cc_sort, ii_sort)
                 logmsg = (
@@ -656,7 +661,7 @@ def evaluate_cv(
                 train_cfg=train_cfg,
                 train_input_arr=train_input_arr,
                 train_config_arr=train_config_arr,
-                error_regret=regret_map,
+                regret_map=regret_map,
                 emb_size=dimensions,
                 epochs=epochs,
                 performance=performances[0],

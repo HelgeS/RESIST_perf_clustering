@@ -1,6 +1,4 @@
 # %%
-import itertools
-
 import numpy as np
 from functools import partial
 import torch
@@ -23,7 +21,7 @@ import plotnine as p9
 # %%
 data_dir = "../data/"
 input_properties_type = "tabular"
-system = "gcc"
+system = "x264"
 method = "embed"
 dimensions = 8
 
@@ -97,12 +95,12 @@ rank_map = input_config_map.groupby("inputname").transform(
     lambda x: stats.rankdata(x, method="min")
 )
 
-regret_map = input_config_map.groupby("inputname").transform(
+regret_map_train = input_config_map.groupby("inputname").transform(
     lambda x: ((x - x.min()) / (x.max() - x.min()))  # .fillna(0)
 )
 
 # We create the rank of inputs for a configuration by ranking their (input-internal) regret
-cfg_rank_map = regret_map.groupby("configurationID").transform(
+cfg_rank_map = regret_map_train.groupby("configurationID").transform(
     lambda x: stats.rankdata(x, method="min")
 )
 
@@ -126,109 +124,74 @@ train_config_arr = config_arr[train_config_mask]
 test_input_arr = input_arr[test_input_mask]
 test_config_arr = config_arr[test_config_mask]
 
-
 # %%
 
 device = "cpu"  # torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-regret_val = (
-    regret_map.reset_index()
-    .pivot_table(index="inputname", columns="configurationID", values=performance)
-    .values
-)
 
-# Kleinster Wert - kleinster/bester Rank
-# rankNet: Bester Rank - hoechster Wert
-# Modify rankNet: Adjust scores by subtraction from max or divide by max
-# (not sure which or if it does matter)
+def rankings(regret_map):
+    regret_inp_cfg = regret_map.pivot_table(
+        index="inputname", columns="configurationID"
+    ).to_numpy()
+    regret_cfg_inp = regret_inp_cfg.T
 
-# TODO Easy function for the whole data preparation and ranking
+    # TODO Extend this to use pareto ranking in case of multiple performances
+    inp_cfg_ranks = stats.rankdata(regret_inp_cfg, method="max", axis=-1)
+    cfg_inp_ranks = stats.rankdata(regret_cfg_inp, method="max", axis=-1)
 
-icr = stats.rankdata(regret_val, method="max", axis=-1)
-inp_cfg_ranks = torch.from_numpy(icr - 1).float().to(device)
+    ## Configuration - Configuration
+    cfg_cfg_corr = pearson_rank_distance_matrix(
+        np.expand_dims(
+            regret_cfg_inp,
+            axis=-1,
+        )
+    ).squeeze(-1)
+    cfg_cfg_ranks = stats.rankdata(cfg_cfg_corr, method="max", axis=-1)
 
-cir = stats.rankdata(regret_val.T, method="max", axis=-1)
-cfg_inp_ranks = torch.from_numpy(cir - 1).float().to(device)
+    ## Input - Input
+    inp_inp_corr = pearson_rank_distance_matrix(
+        np.expand_dims(
+            regret_inp_cfg,
+            axis=-1,
+        )
+    ).squeeze(-1)
+    inp_inp_ranks = stats.rankdata(inp_inp_corr, method="max", axis=-1)
 
-
-## Configuration - Configuration
-cfg_cfg_corr = pearson_rank_distance_matrix(
-    np.expand_dims(
-        regret_map.loc[(train_inp, train_cfg), :]
-        .reset_index()
-        .pivot_table(index="configurationID", columns="inputname", values=performance)
-        .values,
-        axis=-1,
-    )
-).squeeze(-1)
-cfg_cfg_ranks = stats.rankdata(cfg_cfg_corr, method="max", axis=-1)
-cfg_cfg_ranks_tensor = torch.from_numpy(cfg_cfg_ranks).float().to(device)
-
-## Input - Input
-inp_inp_corr = pearson_rank_distance_matrix(
-    np.expand_dims(
-        regret_map.loc[(train_inp, train_cfg), :]
-        .reset_index()
-        .pivot_table(index="inputname", columns="configurationID", values=performance)
-        .values,
-        axis=-1,
-    )
-).squeeze(-1)
-inp_inp_ranks = stats.rankdata(inp_inp_corr, method="max", axis=-1)
-inp_inp_ranks_tensor = torch.from_numpy(inp_inp_ranks).float().to(device)
+    return {
+        "inp_cfg": inp_cfg_ranks,
+        "cfg_inp": cfg_inp_ranks,
+        "inp_inp": inp_inp_ranks,
+        "cfg_cfg": cfg_cfg_ranks,
+    }
 
 
-### TEST DATA
-# TODO rankdata on test split or on full dataset?
-cfg_cfg_corr_t = pearson_rank_distance_matrix(
-    np.expand_dims(
-        regret_map_all.reset_index()
-        .pivot_table(index="configurationID", columns="inputname", values=performance)
-        .values,
-        axis=-1,
-    )
-).squeeze(-1)
-
-# Yo this is not a rank, it's the pearson correlation
-inp_inp_corr_t = pearson_rank_distance_matrix(
-    np.expand_dims(
-        regret_map_all.reset_index()
-        .pivot_table(index="inputname", columns="configurationID", values=performance)
-        .values,
-        axis=-1,
-    )
-).squeeze(-1)
-
-iirt = stats.rankdata(inp_inp_corr_t, method="max", axis=-1)
-ccrt = stats.rankdata(cfg_cfg_corr_t, method="max", axis=-1)
+ranks_train = rankings(regret_map_train)
+ranks_test = rankings(regret_map_all)
 
 
-def get_icrt_cirt(regret_map_all):
-    regret_arr_all = (
-        regret_map_all.reset_index()
-        .pivot_table(index="inputname", columns="configurationID", values=performance)
-        .values
-    )
+def eval(inp_emb, cfg_emb, ranks, input_indices=None, config_indices=None):
+    if input_indices is None:
+        input_indices = np.arange(inp_emb.shape[0])
 
-    icrt = stats.rankdata(regret_arr_all, method="max", axis=-1)
-    cirt = stats.rankdata(regret_arr_all.T, method="max", axis=-1)
-
-    return icrt, cirt
-
-
-icrt, cirt = get_icrt_cirt(regret_map_all)
-
-
-def eval(inp_emb, cfg_emb, iir, ccr, icr, cir):
+    if config_indices is None:
+        config_indices = np.arange(cfg_emb.shape[0])
     correct_inp_inp = np.mean(
-        stats.rankdata(torch.cdist(inp_emb, inp_emb).numpy(), axis=-1) <= iir
+        stats.rankdata(torch.cdist(inp_emb, inp_emb).numpy(), axis=-1)
+        <= ranks["inp_inp"][input_indices, :][:, input_indices]
     )
     correct_cfg_cfg = np.mean(
-        stats.rankdata(torch.cdist(cfg_emb, cfg_emb).numpy(), axis=-1) <= ccr
+        stats.rankdata(torch.cdist(cfg_emb, cfg_emb).numpy(), axis=-1)
+        <= ranks["cfg_cfg"][config_indices, :][:, config_indices]
     )
     dist_ic = torch.cdist(inp_emb, cfg_emb).numpy()
-    correct_inp_cfg = np.mean(stats.rankdata(dist_ic, axis=-1) <= icr)
-    correct_cfg_inp = np.mean(stats.rankdata(dist_ic.T, axis=-1) <= cir)
+    correct_inp_cfg = np.mean(
+        stats.rankdata(dist_ic, axis=-1)
+        <= ranks["inp_cfg"][input_indices, :][:, config_indices]
+    )
+    correct_cfg_inp = np.mean(
+        stats.rankdata(dist_ic.T, axis=-1)
+        <= ranks["cfg_inp"][config_indices, :][:, input_indices]
+    )
     return (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp)
 
 
@@ -240,15 +203,21 @@ def train_func(
     train_config_arr,
     input_arr,
     config_arr,
+    ranks_train,
+    ranks_test,
     emb_size,
     device,
     iterations,
+    batch_size,
     dropout=0.0,
     lr=0.0001,
     hidden_dim=64,
     do_eval=True,
     do_normalize=True,
     verbose=True,
+    use_scheduler=False,
+    max_subtract=False,
+    ranknet_weight_by_diff=False,
 ):
     # iterations = 5000
     # emb_size = 16
@@ -259,6 +228,7 @@ def train_func(
     # do_eval = True
     # do_normalize = True
 
+    ## Models
     num_input_features = train_input_arr.shape[1]
     num_config_features = train_config_arr.shape[1]
 
@@ -285,14 +255,17 @@ def train_func(
         list(input_emb.parameters()) + list(config_emb.parameters()), lr=lr
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, "min", verbose=True
+        optimizer, "min", verbose=verbose
     )
 
     # lnloss = ListNetLoss()
     lnloss = partial(
-        rankNet, weight_by_diff=False, weight_by_diff_powed=False, max_subtract=True
+        rankNet,
+        weight_by_diff=ranknet_weight_by_diff,
+        weight_by_diff_powed=False,
+        max_subtract=max_subtract,
     )
-    lnloss = rankNet  # seems to work much better, but slower
+    # lnloss = rankNet  # seems to work much better, but slower
     # does a form of triplet/pair mining internally
 
     # Early stopping
@@ -301,39 +274,58 @@ def train_func(
 
     train_input_arr = train_input_arr.to(device)
     train_config_arr = train_config_arr.to(device)
+    inp_cfg_ranks_pt = torch.from_numpy(ranks_train["inp_cfg"]).float().to(device)
+    cfg_inp_ranks_pt = torch.from_numpy(ranks_train["cfg_inp"]).float().to(device)
+    inp_inp_ranks_pt = torch.from_numpy(ranks_train["inp_inp"]).float().to(device)
+    cfg_cfg_ranks_pt = torch.from_numpy(ranks_train["cfg_cfg"]).float().to(device)
+
+    all_inp_ind = torch.arange(train_input_arr.shape[0])
+    all_cfg_ind = torch.arange(train_config_arr.shape[0])
 
     for iteration in range(iterations):
-        inp_emb = input_emb(train_input_arr)
-        cfg_emb = config_emb(train_config_arr)  # .detach()
+        if train_input_arr.shape[0] > batch_size > 0:
+            input_indices = torch.randperm(len(all_inp_ind))[:batch_size]
+        else:
+            input_indices = all_inp_ind
+
+        if train_config_arr.shape[0] > batch_size > 0:
+            config_indices = torch.randperm(len(all_cfg_ind))[:batch_size]
+        else:
+            config_indices = all_cfg_ind
+
+        inp_emb = input_emb(train_input_arr[input_indices])
+        cfg_emb = config_emb(train_config_arr[config_indices])  # .detach()
 
         if do_normalize:
             inp_emb = F.normalize(inp_emb)
             cfg_emb = F.normalize(cfg_emb)
 
-        optimizer.zero_grad()
-
         loss = 0
 
-        distmat_inp = torch.cdist(inp_emb, inp_emb)
         loss += lnloss(
-            distmat_inp,
-            inp_inp_ranks_tensor,
+            torch.cdist(inp_emb, inp_emb),
+            inp_inp_ranks_pt[input_indices, :][:, input_indices],
         )
-        distmat_cfg = torch.cdist(cfg_emb, cfg_emb)
         loss += lnloss(
-            distmat_cfg,
-            cfg_cfg_ranks_tensor,
+            torch.cdist(cfg_emb, cfg_emb),
+            cfg_cfg_ranks_pt[config_indices, :][:, config_indices],
         )
 
         distmat = torch.cdist(inp_emb, cfg_emb)
         loss += lnloss(
             distmat,
-            inp_cfg_ranks,  # [input_indices, :][:, config_indices],
+            inp_cfg_ranks_pt[input_indices, :][:, config_indices],
         )
         loss += lnloss(
             distmat.T,
-            cfg_inp_ranks,  # [config_indices, :][:, input_indices],
+            cfg_inp_ranks_pt[config_indices, :][:, input_indices],
         )
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if use_scheduler:
+            scheduler.step(loss)
 
         if loss < best_loss:
             best_loss = loss.detach().item()
@@ -345,7 +337,9 @@ def train_func(
                         correct_cfg_cfg,
                         correct_inp_cfg,
                         correct_cfg_inp,
-                    ) = eval(inp_emb, cfg_emb, inp_inp_ranks, cfg_cfg_ranks, icr, cir)
+                    ) = eval(
+                        inp_emb, cfg_emb, ranks_train, input_indices, config_indices
+                    )
                     avg_train = np.mean(
                         (
                             correct_inp_inp,
@@ -354,6 +348,13 @@ def train_func(
                             correct_cfg_inp,
                         )
                     )
+                    # avg_train = 0
+                    # (
+                    #     correct_inp_inp,
+                    #     correct_cfg_cfg,
+                    #     correct_inp_cfg,
+                    #     correct_cfg_inp,
+                    # ) = (0, 0, 0, 0)
 
                     inp_emb_test = input_emb(input_arr)
                     cfg_emb_test = config_emb(config_arr)
@@ -368,7 +369,11 @@ def train_func(
                         tcorrect_cfg_cfg,
                         tcorrect_inp_cfg,
                         tcorrect_cfg_inp,
-                    ) = eval(inp_emb_test, cfg_emb_test, iirt, ccrt, icrt, cirt)
+                    ) = eval(
+                        inp_emb_test,
+                        cfg_emb_test,
+                        ranks_test,
+                    )
                     avg_test = np.mean(
                         (
                             torrect_inp_inp,
@@ -398,26 +403,34 @@ def train_func(
                 if correct_inp_inp > 0.99 and correct_cfg_cfg > 0.99:
                     break
 
-        loss.backward()
-        optimizer.step()
-
     train.report({"score": best_test_score, "loss": best_loss, "iteration": iteration})
     return best_loss, best_test_score
 
 
-# train(
+# train_func(
 #     train_input_arr,
 #     train_config_arr,
 #     input_arr,
 #     config_arr,
-#     iterations=1000,
-#     emb_size=16,
+#     ranks_train,
+#     ranks_test,
+#     iterations=2500,
+#     batch_size=512,
+#     emb_size=64,  # config["emb_size"],
 #     device=device,
-#     dropout=0.0,
-#     lr=0.0003,
-#     hidden_dim=64,
+#     dropout=0.0,  # config["dropout"],
+#     lr=0.008,  # config["lr"],
+#     hidden_dim=32,  # config["hidden_dim"],
+#     do_normalize=False,  # config["do_normalize"],
+#     max_subtract=True,  # config["max_subtract"],
+#     use_scheduler=False,  # config["use_scheduler"],
+#     ranknet_weight_by_diff=True,  # config["ranknet_weight_by_diff"],
 #     do_eval=True,
+#     verbose=True,
 # )
+
+
+# %%
 
 
 def tune_func(config):
@@ -426,13 +439,19 @@ def tune_func(config):
         train_config_arr,
         input_arr,
         config_arr,
-        iterations=2500,
+        ranks_train,
+        ranks_test,
+        iterations=3000,
+        batch_size=config["batch_size"],
         emb_size=config["emb_size"],
         device=device,
         dropout=config["dropout"],
         lr=config["lr"],
         hidden_dim=config["hidden_dim"],
         do_normalize=config["do_normalize"],
+        max_subtract=config["max_subtract"],
+        use_scheduler=config["use_scheduler"],
+        ranknet_weight_by_diff=config["ranknet_weight_by_diff"],
         do_eval=True,
         verbose=False,
     )
@@ -441,24 +460,25 @@ def tune_func(config):
 search_space = {
     "lr": tune.loguniform(1e-4, 1e-2),
     "dropout": tune.uniform(0.0, 0.5),
-    "emb_size": tune.choice([8, 16, 32, 64, 128, 256]),
-    "hidden_dim": tune.choice([8, 16, 32, 64, 128, 256]),
+    "batch_size": tune.choice([64, 128, 256, 512]),
+    "emb_size": tune.choice([2, 4, 8, 16, 32, 64, 128, 256]),
+    "hidden_dim": tune.choice([2, 4, 8, 16, 32, 64, 128, 256]),
     "max_subtract": tune.choice([True, False]),
     "do_normalize": tune.choice([True, False]),
+    "use_scheduler": tune.choice([True, False]),
+    "ranknet_weight_by_diff": tune.choice([True, False]),
 }
 algo = OptunaSearch()
 tuner = tune.Tuner(
     tune_func,
     tune_config=tune.TuneConfig(
-        metric="score", mode="max", search_alg=algo, num_samples=100
+        metric="score", mode="max", search_alg=algo, num_samples=5000, max_concurrent_trials=5
     ),
     param_space=search_space,
-    run_config=train.RunConfig(
-        stop={"training_iteration": 1000},
-    ),
 )
-tuner.fit()
+results = tuner.fit()
 
+results
 # %%
 
 # q: inp, r: inp
@@ -472,20 +492,20 @@ tuner.fit()
 
 # input-input:
 
-measurements = input_config_map.values.reshape(
-    (len(data_split["train_inp"]), len(data_split["train_cfg"]), 1)
-)
+# measurements = input_config_map.to_numpy().reshape(
+#     (len(data_split["train_inp"]), len(data_split["train_cfg"]), 1)
+# )
 
 
-# TODO If we have more than one performance metric,
-# we can calculate the level in the pareto front as a rank
-# This reduces to simply ranking in the case of one performance metric (nice!)
-ic_dist_mat = stats.rankdata(measurements, axis=1)
-ci_dist_mat = stats.rankdata(measurements, axis=0).swapaxes(0, 1)
+# # TODO If we have more than one performance metric,
+# # we can calculate the level in the pareto front as a rank
+# # This reduces to simply ranking in the case of one performance metric (nice!)
+# ic_dist_mat = stats.rankdata(measurements, axis=1)
+# ci_dist_mat = stats.rankdata(measurements, axis=0).swapaxes(0, 1)
 
-# spearman rank distance
-ii_dist_mat = pearson_rank_distance_matrix(measurements)
-cc_dist_mat = pearson_rank_distance_matrix(measurements.swapaxes(0, 1))
+# # spearman rank distance
+# ii_dist_mat = pearson_rank_distance_matrix(measurements)
+# cc_dist_mat = pearson_rank_distance_matrix(measurements.swapaxes(0, 1))
 
 
 # %%
@@ -498,15 +518,15 @@ cc_dist_mat = pearson_rank_distance_matrix(measurements.swapaxes(0, 1))
 
 # scaler = StandardScaler()
 # y_train = torch.from_numpy(
-#     scaler.fit_transform(train_data[all_performances[0]].values.reshape(-1, 1))
+#     scaler.fit_transform(train_data[all_performances[0]].to_numpy().reshape(-1, 1))
 # )
 
 # train_indices = np.vstack(
 #     (
 #         train_data.configurationID.apply(
 #             lambda s: np.where(train_cfg == s)[0].item()
-#         ).values,
-#         train_data.inputname.apply(lambda s: np.where(train_inp == s)[0].item()).values,
+#         ).to_numpy(),
+#         train_data.inputname.apply(lambda s: np.where(train_inp == s)[0].item()).to_numpy(),
 #     )
 # ).T
 
