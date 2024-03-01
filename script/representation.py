@@ -2,7 +2,6 @@ import argparse
 import copy
 import datetime
 import functools
-import itertools
 import os
 
 import numpy as np
@@ -16,112 +15,18 @@ from common import (
     evaluate_retrieval,
     load_data,
     make_latex_tables,
-    split_data_cv,
     pearson_rank_distance_matrix,
+    split_data_cv,
 )
+from learning import predict, rankNet
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
+from scipy import stats
 from torch import nn
 
 # Purpose of this file
 # We learn a simple embedding of the input and configuration vectors
 # Input_embed() Config_embed() → joint embedding space
-
-
-class ListNetLoss(nn.Module):
-    def __init__(self):
-        super(ListNetLoss, self).__init__()
-
-    def forward(self, pred_scores, true_scores):
-        """
-        pred_scores: Tensor of predicted scores (batch_size x list_size)
-        true_scores: Tensor of ground truth scores (batch_size x list_size)
-        """
-        # Convert scores to probabilities
-        pred_probs = F.softmax(pred_scores, dim=1)
-        true_probs = F.softmax(true_scores, dim=1)
-
-        # Compute cross-entropy loss
-        return torch.mean(-torch.sum(true_probs * torch.log(pred_probs + 1e-10), dim=1))
-
-
-def rankNet(
-    y_pred,
-    y_true,
-    padded_value_indicator=-1,
-    weight_by_diff=False,
-    weight_by_diff_powed=False,
-    max_subtract=True,
-):
-    """
-    RankNet loss introduced in "Learning to Rank using Gradient Descent".
-    :param y_pred: predictions from the model, shape [batch_size, slate_length]
-    :param y_true: ground truth labels, shape [batch_size, slate_length]
-    :param weight_by_diff: flag indicating whether to weight the score differences by ground truth differences.
-    :param weight_by_diff_powed: flag indicating whether to weight the score differences by the squared ground truth differences.
-    :return: loss value, a torch.Tensor
-    """
-    # Original code from https://github.com/allegro/allRank/blob/master/allrank/models/losses/rankNet.py
-    y_pred = y_pred.clone()
-    y_true = y_true.clone()
-
-    if max_subtract:
-        y_pred = y_pred.max(dim=-1).values.unsqueeze(1) - y_pred
-        y_true = y_true.max(dim=-1).values.unsqueeze(1) - y_true
-    else:
-        y_pred = y_pred / y_pred.max(dim=-1).values.unsqueeze(1)
-        y_true = y_true / y_true.max(dim=-1).values.unsqueeze(1)
-
-    mask = y_true == padded_value_indicator
-    y_pred[mask] = float("-inf")
-    y_true[mask] = float("-inf")
-
-    # here we generate every pair of indices from the range of document length in the batch
-    document_pairs_candidates = list(
-        itertools.product(range(y_true.shape[1]), repeat=2)
-    )
-
-    pairs_true = y_true[:, document_pairs_candidates]
-    selected_pred = y_pred[:, document_pairs_candidates]
-
-    # here we calculate the relative true relevance of every candidate pair
-    true_diffs = pairs_true[:, :, 0] - pairs_true[:, :, 1]
-    pred_diffs = selected_pred[:, :, 0] - selected_pred[:, :, 1]
-
-    # here we filter just the pairs that are 'positive' and did not involve a padded instance
-    # we can do that since in the candidate pairs we had symetric pairs so we can stick with
-    # positive ones for a simpler loss function formulation
-    the_mask = (true_diffs > 0) & (~torch.isinf(true_diffs))
-
-    pred_diffs = pred_diffs[the_mask]
-
-    weight = None
-    if weight_by_diff:
-        abs_diff = torch.abs(true_diffs)
-        weight = abs_diff[the_mask]
-    elif weight_by_diff_powed:
-        true_pow_diffs = torch.pow(pairs_true[:, :, 0], 2) - torch.pow(
-            pairs_true[:, :, 1], 2
-        )
-        abs_diff = torch.abs(true_pow_diffs)
-        weight = abs_diff[the_mask]
-
-    # here we 'binarize' true relevancy diffs since for a pairwise loss we just need to know
-    # whether one document is better than the other and not about the actual difference in
-    # their relevancy levels
-    true_diffs = (true_diffs > 0).type(torch.float32)
-    true_diffs = true_diffs[the_mask]
-
-    return nn.BCEWithLogitsLoss(weight=weight)(pred_diffs, true_diffs)
-
-
-def predict(model, x, normalize=False):
-    z = model(x)
-
-    if normalize:
-        z = F.normalize(z, p=2, dim=1)
-
-    return z
 
 
 def train_model_rank(
@@ -183,15 +88,17 @@ def train_model_rank(
         optimizer, "min", verbose=verbose
     )
 
+    # Baseline: Does CE loss between expected and predicted scores
     # lnloss = ListNetLoss()
+
+    # seems to work much better, but slower
+    # does a form of triplet/pair mining internally
     lnloss = functools.partial(
         rankNet,
         weight_by_diff=ranknet_weight_by_diff,
         weight_by_diff_powed=False,
         max_subtract=max_subtract,
     )
-    # lnloss = rankNet  # seems to work much better, but slower
-    # does a form of triplet/pair mining internally
 
     # TODO Should we adjust the list ranking loss to consider min distances?
     # This could be part of the distance matrix,
@@ -211,6 +118,8 @@ def train_model_rank(
     for iteration in range(iterations):
         # TODO Optionally, sample some inputs and configs if dataset too large
         # Check for x264
+        input_emb.train()
+        config_emb.train()
 
         inp_emb = input_emb(train_input_arr)
         cfg_emb = config_emb(train_config_arr)  # .detach()
@@ -252,62 +161,71 @@ def train_model_rank(
             best_loss = loss.detach().item()
 
             if do_eval:
-                with torch.no_grad():
-                    (
-                        correct_inp_inp,
-                        correct_cfg_cfg,
-                        correct_inp_cfg,
-                        correct_cfg_inp,
-                    ) = eval(inp_emb, cfg_emb, ranks_train)
-                    avg_train = np.mean(
-                        (
-                            correct_inp_inp,
-                            correct_cfg_cfg,
-                            correct_inp_cfg,
-                            correct_cfg_inp,
-                        )
-                    )
+                train_scores = eval(
+                    input_emb=input_emb,
+                    config_emb=config_emb,
+                    input_arr=train_input_arr,
+                    config_arr=train_config_arr,
+                    verbose=True,
+                )
+                # TODO We want to know the score for the test data only
+                val_scores = eval(
+                    input_emb=input_emb,
+                    config_emb=config_emb,
+                    input_arr=input_arr,
+                    config_arr=config_arr,
+                    verbose=True,
+                )
 
-                    inp_emb_test = input_emb(input_arr)
-                    cfg_emb_test = config_emb(config_arr)
-
-                    if do_normalize:
-                        inp_emb_test = F.normalize(inp_emb_test)
-                        cfg_emb_test = F.normalize(cfg_emb_test)
-
-                    # TODO Technically we only care about the ranking of the test inputs/configurations, not all of them
-                    (
-                        torrect_inp_inp,
-                        tcorrect_cfg_cfg,
-                        tcorrect_inp_cfg,
-                        tcorrect_cfg_inp,
-                    ) = eval(
-                        inp_emb_test,
-                        cfg_emb_test,
-                        ranks_test,
-                    )
-                    avg_test = np.mean(
-                        (
-                            torrect_inp_inp,
-                            tcorrect_cfg_cfg,
-                            tcorrect_inp_cfg,
-                            tcorrect_cfg_inp,
-                        )
-                    )
-                    if avg_test > best_test_score:
-                        best_test_score = avg_test
-
-                if verbose:
-                    print(
-                        f"{iteration}\t{loss.item():.3f} | {avg_train:.3f} | {correct_inp_inp:.3f} | {correct_cfg_cfg:.3f} | {correct_inp_cfg:.3f} | {correct_cfg_inp:.3f}"
-                    )
-                    print(
-                        f"test\t\t{avg_test:.3f} | {torrect_inp_inp:.3f} | {tcorrect_cfg_cfg:.3f} | {tcorrect_inp_cfg:.3f} | {tcorrect_cfg_inp:.3f}"
-                    )
-                if correct_inp_inp > 0.99 and correct_cfg_cfg > 0.99:
+                if all(c > 0.99 for c in train_scores):
                     break
 
     return best_loss, best_test_score
+
+
+@torch.no_grad()
+def eval(input_emb, config_emb, input_arr, config_arr, ranks, key="", verbose=False):
+    input_emb.eval()
+    config_emb.eval()
+
+    scores = calc_scores(
+        inp_emb=input_emb(input_arr),
+        cfg_emb=config_emb(config_arr),
+        ranks=ranks,
+    )
+    avg_score = np.mean(scores)
+
+    if verbose:
+        res = " | ".join([f"{s:.3f}" for s in scores])
+        print(f"{key}\t\t{avg_score:.3f} | {res}")
+
+    return scores
+
+
+def calc_scores(inp_emb, cfg_emb, ranks, input_indices=None, config_indices=None):
+    if input_indices is None:
+        input_indices = np.arange(inp_emb.shape[0])
+
+    if config_indices is None:
+        config_indices = np.arange(cfg_emb.shape[0])
+    correct_inp_inp = np.mean(
+        stats.rankdata(torch.cdist(inp_emb, inp_emb).numpy(), axis=-1)
+        <= ranks["inp_inp"][input_indices, :][:, input_indices]
+    )
+    correct_cfg_cfg = np.mean(
+        stats.rankdata(torch.cdist(cfg_emb, cfg_emb).numpy(), axis=-1)
+        <= ranks["cfg_cfg"][config_indices, :][:, config_indices]
+    )
+    dist_ic = torch.cdist(inp_emb, cfg_emb).numpy()
+    correct_inp_cfg = np.mean(
+        stats.rankdata(dist_ic, axis=-1)
+        <= ranks["inp_cfg"][input_indices, :][:, config_indices]
+    )
+    correct_cfg_inp = np.mean(
+        stats.rankdata(dist_ic.T, axis=-1)
+        <= ranks["cfg_inp"][config_indices, :][:, input_indices]
+    )
+    return (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp)
 
 
 def train_model(
@@ -505,8 +423,6 @@ def train_model(
         #     distmat_cc,
         #     cfg_cfg_ranks[config_indices, :][:, config_indices],
         # )
-
-
 
         ## Here we take the distance matrix and sample easy positive/hard negative
         # Rank mismatch

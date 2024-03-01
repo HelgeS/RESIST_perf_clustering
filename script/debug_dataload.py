@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from common import (
     load_data,
-    pearson_rank_distance_matrix,
     split_data,
     pareto_rank
 )
@@ -17,6 +16,8 @@ from ray import train, tune
 from ray.tune.search.optuna import OptunaSearch
 
 import plotnine as p9
+
+from script.common import rankings
 
 # %%
 data_dir = "../data/"
@@ -129,71 +130,8 @@ test_config_arr = config_arr[test_config_mask]
 device = "cpu"  # torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def rankings(regret_map):
-    regret_inp_cfg = regret_map.pivot_table(
-        index="inputname", columns="configurationID"
-    ).to_numpy()
-    regret_cfg_inp = regret_inp_cfg.T
-
-    # TODO Extend this to use pareto ranking in case of multiple performances
-    inp_cfg_ranks = stats.rankdata(regret_inp_cfg, method="max", axis=-1)
-    cfg_inp_ranks = stats.rankdata(regret_cfg_inp, method="max", axis=-1)
-
-    ## Configuration - Configuration
-    cfg_cfg_corr = pearson_rank_distance_matrix(
-        np.expand_dims(
-            regret_cfg_inp,
-            axis=-1,
-        )
-    ).squeeze(-1)
-    cfg_cfg_ranks = stats.rankdata(cfg_cfg_corr, method="max", axis=-1)
-
-    ## Input - Input
-    inp_inp_corr = pearson_rank_distance_matrix(
-        np.expand_dims(
-            regret_inp_cfg,
-            axis=-1,
-        )
-    ).squeeze(-1)
-    inp_inp_ranks = stats.rankdata(inp_inp_corr, method="max", axis=-1)
-
-    return {
-        "inp_cfg": inp_cfg_ranks,
-        "cfg_inp": cfg_inp_ranks,
-        "inp_inp": inp_inp_ranks,
-        "cfg_cfg": cfg_cfg_ranks,
-    }
-
-
 ranks_train = rankings(regret_map_train)
 ranks_test = rankings(regret_map_all)
-
-
-def eval(inp_emb, cfg_emb, ranks, input_indices=None, config_indices=None):
-    if input_indices is None:
-        input_indices = np.arange(inp_emb.shape[0])
-
-    if config_indices is None:
-        config_indices = np.arange(cfg_emb.shape[0])
-    correct_inp_inp = np.mean(
-        stats.rankdata(torch.cdist(inp_emb, inp_emb).numpy(), axis=-1)
-        <= ranks["inp_inp"][input_indices, :][:, input_indices]
-    )
-    correct_cfg_cfg = np.mean(
-        stats.rankdata(torch.cdist(cfg_emb, cfg_emb).numpy(), axis=-1)
-        <= ranks["cfg_cfg"][config_indices, :][:, config_indices]
-    )
-    dist_ic = torch.cdist(inp_emb, cfg_emb).numpy()
-    correct_inp_cfg = np.mean(
-        stats.rankdata(dist_ic, axis=-1)
-        <= ranks["inp_cfg"][input_indices, :][:, config_indices]
-    )
-    correct_cfg_inp = np.mean(
-        stats.rankdata(dist_ic.T, axis=-1)
-        <= ranks["cfg_inp"][config_indices, :][:, input_indices]
-    )
-    return (correct_inp_inp, correct_cfg_cfg, correct_inp_cfg, correct_cfg_inp)
-
 
 # %%
 
@@ -337,7 +275,7 @@ def train_func(
                         correct_cfg_cfg,
                         correct_inp_cfg,
                         correct_cfg_inp,
-                    ) = eval(
+                    ) = calc_scores(
                         inp_emb, cfg_emb, ranks_train, input_indices, config_indices
                     )
                     avg_train = np.mean(
@@ -369,7 +307,7 @@ def train_func(
                         tcorrect_cfg_cfg,
                         tcorrect_inp_cfg,
                         tcorrect_cfg_inp,
-                    ) = eval(
+                    ) = calc_scores(
                         inp_emb_test,
                         cfg_emb_test,
                         ranks_test,
