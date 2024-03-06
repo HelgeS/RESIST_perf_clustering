@@ -996,3 +996,39 @@ def evaluate_retrieval(
     ]
 
     return result_dataframes
+
+
+def rankings(regret_map):
+    regret_inp_cfg = regret_map.pivot_table(
+        index="inputname", columns="configurationID"
+    ).to_numpy()
+    regret_cfg_inp = regret_inp_cfg.T
+
+    # TODO Extend this to use pareto ranking in case of multiple performances
+    inp_cfg_ranks = stats.rankdata(regret_inp_cfg, method="max", axis=-1)
+    cfg_inp_ranks = stats.rankdata(regret_cfg_inp, method="max", axis=-1)
+
+    ## Configuration - Configuration
+    cfg_cfg_corr = pearson_rank_distance_matrix(
+        np.expand_dims(
+            regret_cfg_inp,
+            axis=-1,
+        )
+    ).squeeze(-1)
+    cfg_cfg_ranks = stats.rankdata(cfg_cfg_corr, method="max", axis=-1)
+
+    ## Input - Input
+    inp_inp_corr = pearson_rank_distance_matrix(
+        np.expand_dims(
+            regret_inp_cfg,
+            axis=-1,
+        )
+    ).squeeze(-1)
+    inp_inp_ranks = stats.rankdata(inp_inp_corr, method="max", axis=-1)
+
+    return {
+        "inp_cfg": inp_cfg_ranks,
+        "cfg_inp": cfg_inp_ranks,
+        "inp_inp": inp_inp_ranks,
+        "cfg_cfg": cfg_cfg_ranks,
+    }
